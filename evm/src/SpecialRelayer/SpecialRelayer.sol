@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache 2
-pragma solidity >=0.8.8 <0.9.0;
+pragma solidity >=0.8.26 <0.9.0;
 
 import "openzeppelin-contracts/contracts/access/Ownable.sol";
 
@@ -89,23 +89,23 @@ contract SpecialRelayer is ISpecialRelayer, Ownable {
 
     /// @notice Set the default delivery fee (used when no per-chain fee is set).
     function setDefaultDeliveryFee(uint256 fee) external onlyOwner {
-        if (fee < MINIMUM_FEE) revert FeeBelowMinimum(fee, MINIMUM_FEE);
+        require(fee >= MINIMUM_FEE, FeeBelowMinimum(fee, MINIMUM_FEE));
         defaultDeliveryFee = fee;
         emit DefaultDeliveryFeeSet(fee);
     }
 
     /// @notice Set the delivery fee for a specific target chain. Use 0 to fall back to default.
     function setDeliveryFee(uint16 chainId, uint256 fee) external onlyOwner {
-        if (fee != 0 && fee < MINIMUM_FEE) revert FeeBelowMinimum(fee, MINIMUM_FEE);
+        require(fee == 0 || fee >= MINIMUM_FEE, FeeBelowMinimum(fee, MINIMUM_FEE));
         deliveryFeePerChain[chainId] = fee;
         emit DeliveryFeeSet(chainId, fee);
     }
 
     /// @notice Set delivery fees for multiple target chains in one call. Use 0 for a fee to fall back to default.
     function setDeliveryFees(uint16[] calldata chainIds, uint256[] calldata fees) external onlyOwner {
-        if (chainIds.length != fees.length) revert LengthMismatch();
+        require(chainIds.length == fees.length, LengthMismatch());
         for (uint256 i = 0; i < chainIds.length; i++) {
-            if (fees[i] != 0 && fees[i] < MINIMUM_FEE) revert FeeBelowMinimum(fees[i], MINIMUM_FEE);
+            require(fees[i] == 0 || fees[i] >= MINIMUM_FEE, FeeBelowMinimum(fees[i], MINIMUM_FEE));
             deliveryFeePerChain[chainIds[i]] = fees[i];
             emit DeliveryFeeSet(chainIds[i], fees[i]);
         }
@@ -121,7 +121,7 @@ contract SpecialRelayer is ISpecialRelayer, Ownable {
     function withdraw() external {
         address to = feeRecipient != address(0) ? feeRecipient : owner();
         (bool ok,) = to.call{value: address(this).balance}("");
-        if (!ok) revert WithdrawFailed();
+        require(ok, WithdrawFailed());
     }
 
     /// @notice Allow the contract to receive native token.
