@@ -165,5 +165,26 @@ contract SpecialRelayerTest is Test {
 
         relayer.setDeliveryFee(chainId, fee);
     }
+
+    function testSetDefaultDeliveryFeeRevertsWhenBelowMinimum() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(SpecialRelayer.FeeBelowMinimum.selector, 0, 1)
+        );
+        relayer.setDefaultDeliveryFee(0);
+    }
+
+    function testSetDeliveryFeeAllowsZeroForFallback() public {
+        relayer.setDeliveryFee(CHAIN_ID, 0);
+        assertEq(relayer.deliveryFeePerChain(CHAIN_ID), 0);
+    }
+
+    function testSetDeliveryFeeAcceptsMinimumFee() public {
+        relayer.setDeliveryFee(CHAIN_ID, 1);
+        assertEq(relayer.deliveryFeePerChain(CHAIN_ID), 1);
+    }
+
+    function testMinimumFeeConstant() public {
+        assertEq(relayer.MINIMUM_FEE(), 1);
+    }
 }
 

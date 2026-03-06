@@ -14,6 +14,9 @@ import "../interfaces/ISpecialRelayer.sol";
 ///      specialRelayer at deploy time, then enable special relaying per destination chain via
 ///      transceiver.setIsSpecialRelayingEnabled(chainId, true).
 contract SpecialRelayer is ISpecialRelayer, Ownable {
+    /// @notice Minimum fee that can be set. Deploy a new relayer to change this.
+    uint256 public constant MINIMUM_FEE = 1;
+
     /// @notice Default delivery fee in wei when no per-chain fee is set.
     uint256 public defaultDeliveryFee;
 
@@ -49,7 +52,9 @@ contract SpecialRelayer is ISpecialRelayer, Ownable {
     event FeeRecipientSet(address indexed recipient);
 
     error InsufficientPayment(uint256 required, uint256 received);
+    error FeeBelowMinimum(uint256 fee, uint256 minimum);
     error LengthMismatch();
+    error WithdrawFailed();
 
     constructor() Ownable() {}
 
@@ -84,12 +89,14 @@ contract SpecialRelayer is ISpecialRelayer, Ownable {
 
     /// @notice Set the default delivery fee (used when no per-chain fee is set).
     function setDefaultDeliveryFee(uint256 fee) external onlyOwner {
+        if (fee < MINIMUM_FEE) revert FeeBelowMinimum(fee, MINIMUM_FEE);
         defaultDeliveryFee = fee;
         emit DefaultDeliveryFeeSet(fee);
     }
 
     /// @notice Set the delivery fee for a specific target chain. Use 0 to fall back to default.
     function setDeliveryFee(uint16 chainId, uint256 fee) external onlyOwner {
+        if (fee != 0 && fee < MINIMUM_FEE) revert FeeBelowMinimum(fee, MINIMUM_FEE);
         deliveryFeePerChain[chainId] = fee;
         emit DeliveryFeeSet(chainId, fee);
     }
@@ -98,6 +105,7 @@ contract SpecialRelayer is ISpecialRelayer, Ownable {
     function setDeliveryFees(uint16[] calldata chainIds, uint256[] calldata fees) external onlyOwner {
         if (chainIds.length != fees.length) revert LengthMismatch();
         for (uint256 i = 0; i < chainIds.length; i++) {
+            if (fees[i] != 0 && fees[i] < MINIMUM_FEE) revert FeeBelowMinimum(fees[i], MINIMUM_FEE);
             deliveryFeePerChain[chainIds[i]] = fees[i];
             emit DeliveryFeeSet(chainIds[i], fees[i]);
         }
@@ -113,7 +121,7 @@ contract SpecialRelayer is ISpecialRelayer, Ownable {
     function withdraw() external {
         address to = feeRecipient != address(0) ? feeRecipient : owner();
         (bool ok,) = to.call{value: address(this).balance}("");
-        require(ok, "SpecialRelayer: withdraw failed");
+        if (!ok) revert WithdrawFailed();
     }
 
     /// @notice Allow the contract to receive native token.
