@@ -1,5 +1,14 @@
 # EVM
 
+## Special Relayer
+
+To build the special relayer and test it, run the following commands:
+
+```shell
+FOUNDRY_PROFILE=special-relayer forge build --skip 'test/Integration*.sol' --skip 'test/libraries/IntegrationHelpers.sol'
+FOUNDRY_PROFILE=special-relayer forge test --match-path test/SpecialRelayer.t.sol --skip 'test/Integration*.sol' --skip 'test/libraries/IntegrationHelpers.sol'
+```
+
 ## Message Lifecycle (EVM)
 
 1. **Transfer**
