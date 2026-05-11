@@ -136,6 +136,8 @@ contract WormholeTransceiver is
 
         uint256 offset = 0;
         (instruction.shouldSkipRelayerSend, offset) = encoded.asBoolUnchecked(offset);
+        (instruction.signedQuoteBytes, offset) =
+            encoded.sliceUnchecked(offset, encoded.length - offset);
         encoded.checkLength(offset);
     }
 
@@ -143,7 +145,7 @@ contract WormholeTransceiver is
     function encodeWormholeTransceiverInstruction(
         WormholeTransceiverInstruction memory instruction
     ) public pure returns (bytes memory) {
-        return abi.encodePacked(instruction.shouldSkipRelayerSend);
+        return abi.encodePacked(instruction.shouldSkipRelayerSend, instruction.signedQuoteBytes);
     }
 
     // ==================== Internal ========================================================
@@ -167,7 +169,13 @@ contract WormholeTransceiver is
             (uint256 cost,) = wormholeRelayer.quoteEVMDeliveryPrice(targetChain, 0, gasLimit);
             return cost;
         } else if (isSpecialRelayingEnabled(targetChain)) {
-            uint256 cost = specialRelayer.quoteDeliveryPrice(getNttManagerToken(), targetChain, 0);
+            uint256 cost = specialRelayer.quoteDeliveryPrice(
+                getNttManagerToken(),
+                targetChain,
+                0,
+                getWormholePeer(targetChain),
+                abi.encode(gasLimit)
+            );
             // We need to pay both the special relayer cost and the Wormhole message fee independently
             return cost + wormhole.messageFee();
         } else {
@@ -227,7 +235,7 @@ contract WormholeTransceiver is
                 0, encodedTransceiverPayload, consistencyLevel
             );
             specialRelayer.requestDelivery{value: deliveryPayment - wormholeFee}(
-                getNttManagerToken(), recipientChain, 0, sequence
+                getNttManagerToken(), recipientChain, 0, sequence, weIns.signedQuoteBytes
             );
 
             // NOTE: specialized relaying does not currently support refunds. The zero address

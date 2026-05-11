@@ -28,7 +28,10 @@ contract IntegrationHelpers is Test {
         bool relayer_off
     ) public view returns (TransceiverStructs.TransceiverInstruction memory) {
         WormholeTransceiver.WormholeTransceiverInstruction memory instruction =
-            IWormholeTransceiver.WormholeTransceiverInstruction(relayer_off);
+            IWormholeTransceiver.WormholeTransceiverInstruction({
+                shouldSkipRelayerSend: relayer_off,
+                signedQuoteBytes: new bytes(0)
+            });
 
         bytes memory encodedInstructionWormhole;
         // Source fork has id 0 and corresponds to chain 1

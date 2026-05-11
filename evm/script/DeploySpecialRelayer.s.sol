@@ -9,6 +9,8 @@ import {SpecialRelayer} from "../src/SpecialRelayer/SpecialRelayer.sol";
 ///
 /// Environment (optional):
 ///   SPECIAL_RELAYER_DEFAULT_FEE - default delivery fee in wei (default: 0)
+///   SPECIAL_RELAYER_EXECUTION_QUOTER - PenguinBridgeExecutionQuoter address for dynamic fees (default: unset)
+///   SPECIAL_RELAYER_SOURCE_CHAIN_ID - Wormhole chain id of this chain; required for signed-quote flow
 ///   SPECIAL_RELAYER_FEE_RECIPIENT - address that receives withdrawn fees (default: unset, withdraw goes to owner)
 ///   SPECIAL_RELAYER_OWNER       - address to transfer ownership to (default: keep deployer)
 ///
@@ -26,6 +28,21 @@ contract DeploySpecialRelayer is Script {
         if (defaultFee > 0) {
             relayer.setDefaultDeliveryFee(defaultFee);
             console2.log("Default delivery fee set:", defaultFee);
+        }
+
+        address executionQuoter = vm.envOr("SPECIAL_RELAYER_EXECUTION_QUOTER", address(0));
+        if (executionQuoter != address(0)) {
+            relayer.setExecutionQuoter(executionQuoter);
+            console2.log("Execution quoter set:", executionQuoter);
+        }
+
+        uint256 srcChainIdUint = vm.envOr("SPECIAL_RELAYER_SOURCE_CHAIN_ID", uint256(0));
+        if (srcChainIdUint != 0) {
+            require(srcChainIdUint <= type(uint16).max, "Invalid source chain id");
+            // forge-lint: disable-next-line(unsafe-typecast)
+            uint16 srcChainId = uint16(srcChainIdUint);
+            relayer.setSourceChainId(srcChainId);
+            console2.log("Source chain id set:", srcChainId);
         }
 
         address feeRecipient = vm.envOr("SPECIAL_RELAYER_FEE_RECIPIENT", address(0));

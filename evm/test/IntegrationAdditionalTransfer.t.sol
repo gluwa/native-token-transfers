@@ -305,11 +305,15 @@ contract TestAdditionalPayload is Test {
         bool relayer_off
     ) public view returns (bytes memory) {
         WormholeTransceiver.WormholeTransceiverInstruction memory instruction =
-            IWormholeTransceiver.WormholeTransceiverInstruction(relayer_off);
+            IWormholeTransceiver.WormholeTransceiverInstruction({
+                shouldSkipRelayerSend: relayer_off, signedQuoteBytes: new bytes(0)
+            });
         bytes memory encodedInstructionWormhole =
             wormholeTransceiverChain1.encodeWormholeTransceiverInstruction(instruction);
-        TransceiverStructs.TransceiverInstruction memory TransceiverInstruction = TransceiverStructs
-            .TransceiverInstruction({index: 0, payload: encodedInstructionWormhole});
+        TransceiverStructs.TransceiverInstruction memory TransceiverInstruction =
+            TransceiverStructs.TransceiverInstruction({
+                index: 0, payload: encodedInstructionWormhole
+            });
         TransceiverStructs.TransceiverInstruction[] memory TransceiverInstructions =
             new TransceiverStructs.TransceiverInstruction[](1);
         TransceiverInstructions[0] = TransceiverInstruction;

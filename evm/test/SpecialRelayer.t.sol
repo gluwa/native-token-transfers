@@ -1,20 +1,23 @@
 // SPDX-License-Identifier: Apache 2
 
-pragma solidity >=0.8.26 <0.9.0;
+pragma solidity 0.8.19;
 
 import "forge-std/Test.sol";
 
+import "../src/interfaces/IPenguinBridgeExecutionQuoter.sol";
+import "../src/SpecialRelayer/PenguinBridgeExecutionQuoter.sol";
 import "../src/SpecialRelayer/SpecialRelayer.sol";
 
 contract SpecialRelayerTest is Test {
     SpecialRelayer relayer;
+    PenguinBridgeExecutionQuoter quoter;
     uint16 constant CHAIN_ID = 5;
+    uint16 constant SRC_CHAIN_ID = 2;
+    uint256 constant QUOTER_PRIVATE_KEY = 0xA11CE;
+    bytes4 constant SIGNED_QUOTE_PREFIX = 0x50513031;
 
     event DeliveryRequested(
-        address indexed sourceContract,
-        uint16 indexed targetChain,
-        uint64 indexed sequence,
-        uint256 payment
+        address indexed sourceContract, uint16 indexed targetChain, uint64 indexed sequence, uint256 payment
     );
 
     event DefaultDeliveryFeeSet(uint256 fee);
@@ -25,6 +28,8 @@ contract SpecialRelayerTest is Test {
 
     function setUp() public {
         relayer = new SpecialRelayer();
+        relayer.setSourceChainId(SRC_CHAIN_ID);
+        quoter = new PenguinBridgeExecutionQuoter();
     }
 
     function testDefaultFeeUsedWhenNoPerChainFeeSet() public {
@@ -77,11 +82,7 @@ contract SpecialRelayerTest is Test {
         vm.deal(user, required - 1);
 
         vm.startPrank(user);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                SpecialRelayer.InsufficientPayment.selector, required, required - 1
-            )
-        );
+        vm.expectRevert(abi.encodeWithSelector(SpecialRelayer.InsufficientPayment.selector, required, required - 1));
         relayer.requestDelivery{value: required - 1}(address(this), CHAIN_ID, 0, 42);
         vm.stopPrank();
     }
@@ -102,6 +103,105 @@ contract SpecialRelayerTest is Test {
         relayer.requestDelivery{value: value}(address(this), CHAIN_ID, 0, 7);
 
         assertEq(address(relayer).balance, value);
+    }
+
+    function testQuoteDeliveryPriceUsesExecutionQuoterWhenConfigured() public {
+        address oracle = address(0xA0A);
+        quoter.setOracleService(oracle);
+
+        IPenguinBridgeExecutionQuoter.PricingData memory price = IPenguinBridgeExecutionQuoter.PricingData({
+            dstPrice: uint64(1_000 * 10 ** 10), dstGasPrice: 20 gwei, priceBuffer: 1_000, baseFee: 0.001 ether
+        });
+
+        vm.prank(oracle);
+        quoter.priceUpdate(uint64(2_000 * 10 ** 10), CHAIN_ID, price);
+        relayer.setExecutionQuoter(address(quoter));
+
+        uint256 quote = relayer.quoteDeliveryPrice(
+            address(this), CHAIN_ID, 2 ether, bytes32(uint256(uint160(address(0xCAFE)))), abi.encode(uint256(500_000))
+        );
+
+        assertEq(quote, 1 ether + 0.0066 ether);
+    }
+
+    function testRequestDeliveryWithSignedQuotePaysUniversalPayee() public {
+        address signer = vm.addr(QUOTER_PRIVATE_KEY);
+        address payee = address(0xFEE1);
+        uint256 required = 0.25 ether;
+        bytes memory signedQuote = _signedQuote(signer, payee, CHAIN_ID, required, 1 hours);
+
+        quoter.addQuoter(signer);
+        relayer.setExecutionQuoter(address(quoter));
+
+        address user = address(0xCAFE);
+        vm.deal(user, required);
+        uint256 payeeBalanceBefore = payee.balance;
+
+        vm.expectEmit(true, true, true, true);
+        emit DeliveryRequested(address(this), CHAIN_ID, 7, required);
+
+        vm.prank(user);
+        relayer.requestDelivery{value: required}(address(this), CHAIN_ID, 0, 7, signedQuote);
+
+        assertEq(payee.balance, payeeBalanceBefore + required);
+        assertEq(address(relayer).balance, 0);
+    }
+
+    function testRequestDeliveryWithSignedQuoteRevertsWhenQuoteMissing() public {
+        relayer.setExecutionQuoter(address(quoter));
+
+        vm.expectRevert(SpecialRelayer.SignedQuoteRequired.selector);
+        relayer.requestDelivery{value: 1 ether}(address(this), CHAIN_ID, 0, 7);
+    }
+
+    function testRequestDeliveryWithSignedQuoteRevertsWhenExpired() public {
+        address signer = vm.addr(QUOTER_PRIVATE_KEY);
+        bytes memory signedQuote = _signedQuote(signer, address(0xFEE1), CHAIN_ID, 0.25 ether, 1 hours);
+
+        quoter.addQuoter(signer);
+        relayer.setExecutionQuoter(address(quoter));
+        vm.warp(block.timestamp + 2 hours);
+
+        vm.expectRevert();
+        relayer.requestDelivery{value: 0.25 ether}(address(this), CHAIN_ID, 0, 7, signedQuote);
+    }
+
+    function testRequestDeliveryWithSignedQuoteRevertsWhenSignerUnauthorized() public {
+        address signer = vm.addr(QUOTER_PRIVATE_KEY);
+        bytes memory signedQuote = _signedQuote(signer, address(0xFEE1), CHAIN_ID, 0.25 ether, 1 hours);
+
+        relayer.setExecutionQuoter(address(quoter));
+
+        vm.expectRevert(abi.encodeWithSelector(SpecialRelayer.InvalidQuoteSigner.selector, signer));
+        relayer.requestDelivery{value: 0.25 ether}(address(this), CHAIN_ID, 0, 7, signedQuote);
+    }
+
+    function testRequestDeliveryWithSignedQuoteRevertsOnWrongSourceChain() public {
+        address signer = vm.addr(QUOTER_PRIVATE_KEY);
+        // Quote signed for a different source chain than this relayer is deployed on.
+        uint16 wrongSrcChain = SRC_CHAIN_ID + 1;
+        bytes memory signedQuote =
+            _signedQuoteWithSrc(signer, address(0xFEE1), wrongSrcChain, CHAIN_ID, 0.25 ether, 1 hours);
+
+        quoter.addQuoter(signer);
+        relayer.setExecutionQuoter(address(quoter));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(SpecialRelayer.InvalidQuoteSourceChain.selector, SRC_CHAIN_ID, wrongSrcChain)
+        );
+        relayer.requestDelivery{value: 0.25 ether}(address(this), CHAIN_ID, 0, 7, signedQuote);
+    }
+
+    function testRequestDeliveryWithSignedQuoteRevertsWhenSourceChainIdNotSet() public {
+        // Fresh relayer with no source chain id configured.
+        SpecialRelayer freshRelayer = new SpecialRelayer();
+        freshRelayer.setExecutionQuoter(address(quoter));
+
+        address signer = vm.addr(QUOTER_PRIVATE_KEY);
+        bytes memory signedQuote = _signedQuote(signer, address(0xFEE1), CHAIN_ID, 0.25 ether, 1 hours);
+
+        vm.expectRevert(SpecialRelayer.SourceChainIdNotSet.selector);
+        freshRelayer.requestDelivery{value: 0.25 ether}(address(this), CHAIN_ID, 0, 7, signedQuote);
     }
 
     function testWithdrawSendsBalanceToOwnerWhenNoFeeRecipient() public {
@@ -167,9 +267,7 @@ contract SpecialRelayerTest is Test {
     }
 
     function testSetDefaultDeliveryFeeRevertsWhenBelowMinimum() public {
-        vm.expectRevert(
-            abi.encodeWithSelector(SpecialRelayer.FeeBelowMinimum.selector, 0, 1)
-        );
+        vm.expectRevert(abi.encodeWithSelector(SpecialRelayer.FeeBelowMinimum.selector, 0, 1));
         relayer.setDefaultDeliveryFee(0);
     }
 
@@ -186,5 +284,33 @@ contract SpecialRelayerTest is Test {
     function testMinimumFeeConstant() public {
         assertEq(relayer.MINIMUM_FEE(), 1);
     }
-}
 
+    function _signedQuote(address signer, address payee, uint16 dstChain, uint256 requiredPayment, uint64 expiresIn)
+        internal
+        view
+        returns (bytes memory)
+    {
+        return _signedQuoteWithSrc(signer, payee, SRC_CHAIN_ID, dstChain, requiredPayment, expiresIn);
+    }
+
+    function _signedQuoteWithSrc(
+        address signer,
+        address payee,
+        uint16 srcChain,
+        uint16 dstChain,
+        uint256 requiredPayment,
+        uint64 expiresIn
+    ) internal view returns (bytes memory) {
+        bytes memory body = abi.encodePacked(
+            SIGNED_QUOTE_PREFIX,
+            signer,
+            bytes32(uint256(uint160(payee))),
+            srcChain,
+            dstChain,
+            uint64(block.timestamp) + expiresIn,
+            requiredPayment
+        );
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(QUOTER_PRIVATE_KEY, keccak256(body));
+        return bytes.concat(body, abi.encodePacked(r, s, v));
+    }
+}
