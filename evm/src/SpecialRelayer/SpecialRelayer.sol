@@ -2,6 +2,7 @@
 pragma solidity >=0.8.19 <0.9.0;
 
 import "openzeppelin-contracts/contracts/access/Ownable.sol";
+import "openzeppelin-contracts/contracts/security/ReentrancyGuard.sol";
 import "openzeppelin-contracts/contracts/utils/cryptography/ECDSA.sol";
 
 import "../interfaces/IPenguinBridgeExecutionQuoter.sol";
@@ -15,7 +16,7 @@ import "../interfaces/ISpecialRelayer.sol";
 /// @dev Deploy one per source chain. Set this contract's address as the WormholeTransceiver's
 ///      specialRelayer at deploy time, then enable special relaying per destination chain via
 ///      transceiver.setIsSpecialRelayingEnabled(chainId, true).
-contract SpecialRelayer is ISpecialRelayer, Ownable {
+contract SpecialRelayer is ISpecialRelayer, Ownable, ReentrancyGuard {
     using ECDSA for bytes32;
 
     /// @notice Minimum fee that can be set. Deploy a new relayer to change this.
@@ -83,6 +84,7 @@ contract SpecialRelayer is ISpecialRelayer, Ownable {
     }
 
     error InsufficientPayment(uint256 required, uint256 received);
+    error RefundFailed(address recipient, uint256 amount);
     error FeeBelowMinimum(uint256 fee, uint256 minimum);
     error LengthMismatch();
     error InvalidQuoteLength(uint256 length);
@@ -155,6 +157,7 @@ contract SpecialRelayer is ISpecialRelayer, Ownable {
     )
         external
         payable
+        nonReentrant
     {
         _requestDelivery(sourceContract, targetChain, sequence, new bytes(0));
     }
@@ -167,7 +170,7 @@ contract SpecialRelayer is ISpecialRelayer, Ownable {
         /* additionalValue */
         uint64 sequence,
         bytes calldata signedQuoteBytes
-    ) external payable {
+    ) external payable nonReentrant {
         _requestDelivery(sourceContract, targetChain, sequence, signedQuoteBytes);
     }
 
@@ -179,7 +182,7 @@ contract SpecialRelayer is ISpecialRelayer, Ownable {
     ) internal {
         IPenguinBridgeExecutionQuoter executionQuoter = penguinBridgeExecutionQuoter;
         if (address(executionQuoter) == address(0)) {
-            uint256 fallbackRequired = this.quoteDeliveryPrice(sourceContract, targetChain, 0);
+            uint256 fallbackRequired = _quoteDeliveryPrice(targetChain, 0, bytes32(0), new bytes(0));
             if (msg.value < fallbackRequired) {
                 revert InsufficientPayment(fallbackRequired, msg.value);
             }
@@ -225,12 +228,23 @@ contract SpecialRelayer is ISpecialRelayer, Ownable {
             revert InvalidPayeeAddress(q.universalPayeeAddress);
         }
         address payee = address(uint160(uint256(q.universalPayeeAddress)));
-        (bool ok,) = payable(payee).call{value: msg.value}("");
-        if (!ok) {
-            revert QuotePaymentFailed(payee, msg.value);
+
+        // Forward exactly the quoted amount to the payee; refund any excess to the caller
+        // so users aren't penalized for overpaying.
+        (bool paid,) = payable(payee).call{value: q.requiredPayment}("");
+        if (!paid) {
+            revert QuotePaymentFailed(payee, q.requiredPayment);
         }
 
-        emit DeliveryRequested(sourceContract, targetChain, sequence, msg.value);
+        uint256 refund = msg.value - q.requiredPayment;
+        if (refund > 0) {
+            (bool refunded,) = payable(msg.sender).call{value: refund}("");
+            if (!refunded) {
+                revert RefundFailed(msg.sender, refund);
+            }
+        }
+
+        emit DeliveryRequested(sourceContract, targetChain, sequence, q.requiredPayment);
     }
 
     function _parseSignedQuote(bytes memory signedQuoteBytes) internal pure returns (ParsedQuote memory q) {

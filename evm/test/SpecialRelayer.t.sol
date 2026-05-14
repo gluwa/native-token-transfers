@@ -204,6 +204,51 @@ contract SpecialRelayerTest is Test {
         freshRelayer.requestDelivery{value: 0.25 ether}(address(this), CHAIN_ID, 0, 7, signedQuote);
     }
 
+    function testRequestDeliveryWithSignedQuoteRefundsExcessToCaller() public {
+        address signer = vm.addr(QUOTER_PRIVATE_KEY);
+        address payee = address(0xFEE1);
+        uint256 required = 0.25 ether;
+        uint256 overpay = 0.1 ether;
+        uint256 sent = required + overpay;
+        bytes memory signedQuote = _signedQuote(signer, payee, CHAIN_ID, required, 1 hours);
+
+        quoter.addQuoter(signer);
+        relayer.setExecutionQuoter(address(quoter));
+
+        address user = address(0xCAFE);
+        vm.deal(user, sent);
+        uint256 payeeBalanceBefore = payee.balance;
+
+        // The emitted payment should reflect the quoted amount, not msg.value.
+        vm.expectEmit(true, true, true, true);
+        emit DeliveryRequested(address(this), CHAIN_ID, 7, required);
+
+        vm.prank(user);
+        relayer.requestDelivery{value: sent}(address(this), CHAIN_ID, 0, 7, signedQuote);
+
+        assertEq(payee.balance, payeeBalanceBefore + required, "payee receives only the quoted amount");
+        assertEq(user.balance, overpay, "caller is refunded the excess");
+        assertEq(address(relayer).balance, 0, "relayer holds nothing");
+    }
+
+    function testRequestDeliveryWithSignedQuoteRevertsOnInvalidPayeeAddress() public {
+        address signer = vm.addr(QUOTER_PRIVATE_KEY);
+        // Payee with non-zero high bits — not a valid EVM address.
+        bytes32 invalidPayee = bytes32(uint256(1 << 200) | uint256(uint160(address(0xFEE1))));
+        uint256 required = 0.25 ether;
+        bytes memory signedQuote = _signedQuoteRawPayee(signer, invalidPayee, SRC_CHAIN_ID, CHAIN_ID, required, 1 hours);
+
+        quoter.addQuoter(signer);
+        relayer.setExecutionQuoter(address(quoter));
+
+        address user = address(0xCAFE);
+        vm.deal(user, required);
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(SpecialRelayer.InvalidPayeeAddress.selector, invalidPayee));
+        relayer.requestDelivery{value: required}(address(this), CHAIN_ID, 0, 7, signedQuote);
+    }
+
     function testWithdrawSendsBalanceToOwnerWhenNoFeeRecipient() public {
         uint256 amount = 1 ether;
         vm.deal(address(relayer), amount);
@@ -301,14 +346,21 @@ contract SpecialRelayerTest is Test {
         uint256 requiredPayment,
         uint64 expiresIn
     ) internal view returns (bytes memory) {
+        return _signedQuoteRawPayee(
+            signer, bytes32(uint256(uint160(payee))), srcChain, dstChain, requiredPayment, expiresIn
+        );
+    }
+
+    function _signedQuoteRawPayee(
+        address signer,
+        bytes32 payee,
+        uint16 srcChain,
+        uint16 dstChain,
+        uint256 requiredPayment,
+        uint64 expiresIn
+    ) internal view returns (bytes memory) {
         bytes memory body = abi.encodePacked(
-            SIGNED_QUOTE_PREFIX,
-            signer,
-            bytes32(uint256(uint160(payee))),
-            srcChain,
-            dstChain,
-            uint64(block.timestamp) + expiresIn,
-            requiredPayment
+            SIGNED_QUOTE_PREFIX, signer, payee, srcChain, dstChain, uint64(block.timestamp) + expiresIn, requiredPayment
         );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(QUOTER_PRIVATE_KEY, keccak256(body));
         return bytes.concat(body, abi.encodePacked(r, s, v));
