@@ -7,9 +7,11 @@ import "./IWormholeTransceiverState.sol";
 
 interface IWormholeTransceiver is IWormholeTransceiverState {
     /// @notice The instruction for the WormholeTransceiver contract
-    ///         to skip delivery via the relayer.
+    ///         to skip delivery via the relayer, or to carry a signed quote
+    ///         when using the special relayer.
     struct WormholeTransceiverInstruction {
         bool shouldSkipRelayerSend;
+        bytes signedQuoteBytes;
     }
 
     /// @notice Emitted when a relayed message is received.

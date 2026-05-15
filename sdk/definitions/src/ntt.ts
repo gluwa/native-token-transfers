@@ -79,6 +79,8 @@ export namespace Ntt {
     automatic?: boolean;
     /** Whether or not the token needs to be wrapped, only relevant for gas token transfers */
     wrapNative?: boolean;
+    /** Signed SpecialRelayer quote bytes for dynamic-fee execution */
+    signedQuoteBytes?: Uint8Array;
   };
 
   // TODO: what are the set of attestation types for Ntt?

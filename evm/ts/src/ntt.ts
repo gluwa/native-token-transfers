@@ -76,8 +76,15 @@ export class EvmNttWormholeTranceiver<N extends Network, C extends EvmChains>
     };
   }
 
-  encodeFlags(flags: { skipRelay: boolean }): Uint8Array {
-    return new Uint8Array([flags.skipRelay ? 1 : 0]);
+  encodeFlags(flags: {
+    skipRelay: boolean;
+    signedQuoteBytes?: Uint8Array;
+  }): Uint8Array {
+    const signedQuoteBytes = flags.signedQuoteBytes ?? new Uint8Array();
+    const encoded = new Uint8Array(1 + signedQuoteBytes.length);
+    encoded[0] = flags.skipRelay ? 1 : 0;
+    encoded.set(signedQuoteBytes, 1);
+    return encoded;
   }
 
   async *setPeer<P extends Chain>(
@@ -410,6 +417,7 @@ export class EvmNtt<N extends Network, C extends EvmChains>
       index: 0,
       payload: this.xcvrs[0]!.encodeFlags({
         skipRelay: !options.automatic,
+        signedQuoteBytes: options.signedQuoteBytes,
       }),
     });
 
