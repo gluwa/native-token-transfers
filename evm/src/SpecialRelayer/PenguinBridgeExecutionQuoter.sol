@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache 2
 pragma solidity >=0.8.19 <0.9.0;
 
-import "openzeppelin-contracts/contracts/access/Ownable.sol";
+import "openzeppelin-contracts/contracts/access/Ownable2Step.sol";
 
 import "../interfaces/IPenguinBridgeExecutionQuoter.sol";
 
 /// @title PenguinBridgeExecutionQuoter
 /// @notice On-chain execution price source for SpecialRelayer delivery quotes.
-contract PenguinBridgeExecutionQuoter is IPenguinBridgeExecutionQuoter, Ownable {
+contract PenguinBridgeExecutionQuoter is IPenguinBridgeExecutionQuoter, Ownable2Step {
     uint256 public constant BPS_DENOMINATOR = 10_000;
 
     /// @notice Source chain native token USD price, scaled by 1e10.
@@ -17,6 +17,7 @@ contract PenguinBridgeExecutionQuoter is IPenguinBridgeExecutionQuoter, Ownable 
     address public oracleService;
 
     /// @notice Universal source-chain address that receives execution payments.
+    ///         If unset, payments fall back to the contract owner.
     bytes32 public payeeAddress;
 
     mapping(uint16 => PricingData) public pricingData;
@@ -99,29 +100,31 @@ contract PenguinBridgeExecutionQuoter is IPenguinBridgeExecutionQuoter, Ownable 
 
     function requestExecutionQuote(
         uint16 dstChain,
-        bytes32 dstAddr,
-        address refundAddr,
+        bytes32,
+        address,
         bytes calldata requestBytes,
         bytes calldata relayInstructions
     ) external returns (uint256, bytes32, bytes32) {
-        uint256 requiredPayment = this.requestQuote(dstChain, dstAddr, refundAddr, requestBytes, relayInstructions);
+        uint256 requiredPayment = _quote(dstChain, _decodeUint256(requestBytes), _decodeUint256(relayInstructions));
         emit ExecutionQuoteRequested(dstChain, requiredPayment);
-        return (requiredPayment, payeeAddress, bytes32(0));
+        bytes32 payee = payeeAddress;
+        if (payee == bytes32(0)) {
+            payee = bytes32(uint256(uint160(owner())));
+        }
+        return (requiredPayment, payee, bytes32(0));
     }
 
     function _quote(uint16 dstChain, uint256 msgValue, uint256 gasLimit) internal view returns (uint256) {
-        uint64 srcPrice = sourcePrice;
+        uint256 srcPrice = sourcePrice;
         if (srcPrice == 0) {
             revert SourcePriceNotSet();
         }
-
         PricingData memory price = pricingData[dstChain];
-        uint256 convertedMsgValue = msgValue * uint256(price.dstPrice) / uint256(srcPrice);
-        uint256 convertedGas = gasLimit * uint256(price.dstGasPrice) * uint256(price.dstPrice) / uint256(srcPrice);
-        uint256 transactionFee = uint256(price.baseFee) + convertedGas;
-        uint256 bufferedFee = transactionFee * (BPS_DENOMINATOR + uint256(price.priceBuffer)) / BPS_DENOMINATOR;
-
-        return convertedMsgValue + bufferedFee;
+        unchecked {
+            uint256 fee = price.baseFee + gasLimit * price.dstGasPrice * price.dstPrice / srcPrice;
+            return msgValue * price.dstPrice / srcPrice
+                + fee * (BPS_DENOMINATOR + price.priceBuffer) / BPS_DENOMINATOR;
+        }
     }
 
     function _decodeUint256(bytes calldata encoded) internal pure returns (uint256 value) {

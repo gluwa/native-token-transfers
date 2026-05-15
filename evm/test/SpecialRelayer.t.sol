@@ -20,89 +20,23 @@ contract SpecialRelayerTest is Test {
         address indexed sourceContract, uint16 indexed targetChain, uint64 indexed sequence, uint256 payment
     );
 
-    event DefaultDeliveryFeeSet(uint256 fee);
-
-    event DeliveryFeeSet(uint16 chainId, uint256 fee);
-
-    event FeeRecipientSet(address indexed recipient);
-
     function setUp() public {
         relayer = new SpecialRelayer();
         relayer.setSourceChainId(SRC_CHAIN_ID);
         quoter = new PenguinBridgeExecutionQuoter();
+        relayer.setExecutionQuoter(address(quoter));
     }
 
-    function testDefaultFeeUsedWhenNoPerChainFeeSet() public {
-        relayer.setDefaultDeliveryFee(1 ether);
+    function testQuoteRevertsWhenExecutionQuoterUnset() public {
+        SpecialRelayer freshRelayer = new SpecialRelayer();
 
-        uint256 quote = relayer.quoteDeliveryPrice(address(0x1234), CHAIN_ID, 0);
-        assertEq(quote, 1 ether);
+        vm.expectRevert(SpecialRelayer.ExecutionQuoterNotSet.selector);
+        freshRelayer.quoteDeliveryPrice(address(0x1234), CHAIN_ID, 0);
     }
 
-    function testPerChainFeeOverridesDefault() public {
-        relayer.setDefaultDeliveryFee(1 ether);
-        relayer.setDeliveryFee(CHAIN_ID, 2 ether);
-
-        uint256 quote = relayer.quoteDeliveryPrice(address(0x1234), CHAIN_ID, 0);
-        assertEq(quote, 2 ether);
-    }
-
-    function testSetDeliveryFeesBatchUpdatesAll() public {
-        uint16[] memory chainIds = new uint16[](2);
-        chainIds[0] = 1;
-        chainIds[1] = 2;
-
-        uint256[] memory fees = new uint256[](2);
-        fees[0] = 10;
-        fees[1] = 20;
-
-        relayer.setDeliveryFees(chainIds, fees);
-
-        assertEq(relayer.deliveryFeePerChain(1), 10);
-        assertEq(relayer.deliveryFeePerChain(2), 20);
-    }
-
-    function testSetDeliveryFeesLengthMismatchReverts() public {
-        uint16[] memory chainIds = new uint16[](1);
-        chainIds[0] = 1;
-
-        uint256[] memory fees = new uint256[](2);
-        fees[0] = 10;
-        fees[1] = 20;
-
-        vm.expectRevert(SpecialRelayer.LengthMismatch.selector);
-        relayer.setDeliveryFees(chainIds, fees);
-    }
-
-    function testRequestDeliveryRevertsOnInsufficientPayment() public {
-        relayer.setDefaultDeliveryFee(1 ether);
-        uint256 required = relayer.quoteDeliveryPrice(address(this), CHAIN_ID, 0);
-
-        address user = address(0xBEEF);
-        vm.deal(user, required - 1);
-
-        vm.startPrank(user);
-        vm.expectRevert(abi.encodeWithSelector(SpecialRelayer.InsufficientPayment.selector, required, required - 1));
-        relayer.requestDelivery{value: required - 1}(address(this), CHAIN_ID, 0, 42);
-        vm.stopPrank();
-    }
-
-    function testRequestDeliveryEmitsEventAndAccumulatesBalance() public {
-        relayer.setDefaultDeliveryFee(1 ether);
-        uint256 required = relayer.quoteDeliveryPrice(address(this), CHAIN_ID, 0);
-        uint256 extra = 0.1 ether;
-        uint256 value = required + extra;
-
-        address user = address(0xCAFE);
-        vm.deal(user, value);
-
-        vm.expectEmit(true, true, true, true);
-        emit DeliveryRequested(address(this), CHAIN_ID, 7, value);
-
-        vm.prank(user);
-        relayer.requestDelivery{value: value}(address(this), CHAIN_ID, 0, 7);
-
-        assertEq(address(relayer).balance, value);
+    function testRequestDeliveryWithoutSignedQuoteReverts() public {
+        vm.expectRevert(SpecialRelayer.SignedQuoteRequired.selector);
+        relayer.requestDelivery{value: 1 ether}(address(this), CHAIN_ID, 0, 7);
     }
 
     function testQuoteDeliveryPriceUsesExecutionQuoterWhenConfigured() public {
@@ -115,7 +49,6 @@ contract SpecialRelayerTest is Test {
 
         vm.prank(oracle);
         quoter.priceUpdate(uint64(2_000 * 10 ** 10), CHAIN_ID, price);
-        relayer.setExecutionQuoter(address(quoter));
 
         uint256 quote = relayer.quoteDeliveryPrice(
             address(this), CHAIN_ID, 2 ether, bytes32(uint256(uint160(address(0xCAFE)))), abi.encode(uint256(500_000))
@@ -131,7 +64,6 @@ contract SpecialRelayerTest is Test {
         bytes memory signedQuote = _signedQuote(signer, payee, CHAIN_ID, required, 1 hours);
 
         quoter.addQuoter(signer);
-        relayer.setExecutionQuoter(address(quoter));
 
         address user = address(0xCAFE);
         vm.deal(user, required);
@@ -148,10 +80,19 @@ contract SpecialRelayerTest is Test {
     }
 
     function testRequestDeliveryWithSignedQuoteRevertsWhenQuoteMissing() public {
-        relayer.setExecutionQuoter(address(quoter));
-
         vm.expectRevert(SpecialRelayer.SignedQuoteRequired.selector);
         relayer.requestDelivery{value: 1 ether}(address(this), CHAIN_ID, 0, 7);
+    }
+
+    function testRequestDeliveryWithSignedQuoteRevertsWhenExecutionQuoterUnset() public {
+        SpecialRelayer freshRelayer = new SpecialRelayer();
+        freshRelayer.setSourceChainId(SRC_CHAIN_ID);
+
+        address signer = vm.addr(QUOTER_PRIVATE_KEY);
+        bytes memory signedQuote = _signedQuote(signer, address(0xFEE1), CHAIN_ID, 0.25 ether, 1 hours);
+
+        vm.expectRevert(SpecialRelayer.ExecutionQuoterNotSet.selector);
+        freshRelayer.requestDelivery{value: 0.25 ether}(address(this), CHAIN_ID, 0, 7, signedQuote);
     }
 
     function testRequestDeliveryWithSignedQuoteRevertsWhenExpired() public {
@@ -159,7 +100,6 @@ contract SpecialRelayerTest is Test {
         bytes memory signedQuote = _signedQuote(signer, address(0xFEE1), CHAIN_ID, 0.25 ether, 1 hours);
 
         quoter.addQuoter(signer);
-        relayer.setExecutionQuoter(address(quoter));
         vm.warp(block.timestamp + 2 hours);
 
         vm.expectRevert();
@@ -169,8 +109,6 @@ contract SpecialRelayerTest is Test {
     function testRequestDeliveryWithSignedQuoteRevertsWhenSignerUnauthorized() public {
         address signer = vm.addr(QUOTER_PRIVATE_KEY);
         bytes memory signedQuote = _signedQuote(signer, address(0xFEE1), CHAIN_ID, 0.25 ether, 1 hours);
-
-        relayer.setExecutionQuoter(address(quoter));
 
         vm.expectRevert(abi.encodeWithSelector(SpecialRelayer.InvalidQuoteSigner.selector, signer));
         relayer.requestDelivery{value: 0.25 ether}(address(this), CHAIN_ID, 0, 7, signedQuote);
@@ -184,7 +122,6 @@ contract SpecialRelayerTest is Test {
             _signedQuoteWithSrc(signer, address(0xFEE1), wrongSrcChain, CHAIN_ID, 0.25 ether, 1 hours);
 
         quoter.addQuoter(signer);
-        relayer.setExecutionQuoter(address(quoter));
 
         vm.expectRevert(
             abi.encodeWithSelector(SpecialRelayer.InvalidQuoteSourceChain.selector, SRC_CHAIN_ID, wrongSrcChain)
@@ -213,7 +150,6 @@ contract SpecialRelayerTest is Test {
         bytes memory signedQuote = _signedQuote(signer, payee, CHAIN_ID, required, 1 hours);
 
         quoter.addQuoter(signer);
-        relayer.setExecutionQuoter(address(quoter));
 
         address user = address(0xCAFE);
         vm.deal(user, sent);
@@ -239,7 +175,6 @@ contract SpecialRelayerTest is Test {
         bytes memory signedQuote = _signedQuoteRawPayee(signer, invalidPayee, SRC_CHAIN_ID, CHAIN_ID, required, 1 hours);
 
         quoter.addQuoter(signer);
-        relayer.setExecutionQuoter(address(quoter));
 
         address user = address(0xCAFE);
         vm.deal(user, required);
@@ -249,85 +184,49 @@ contract SpecialRelayerTest is Test {
         relayer.requestDelivery{value: required}(address(this), CHAIN_ID, 0, 7, signedQuote);
     }
 
-    function testWithdrawSendsBalanceToOwnerWhenNoFeeRecipient() public {
-        uint256 amount = 1 ether;
-        vm.deal(address(relayer), amount);
+    function testRequestDeliveryWithZeroPayeeFallsBackToOwner() public {
+        // Move ownership to a plain EOA so the contract can forward ETH to it.
+        address newOwner = address(0xABCD);
+        relayer.transferOwnership(newOwner);
+        vm.prank(newOwner);
+        relayer.acceptOwnership();
 
-        address ownerEOA = address(0xABCD);
-        relayer.transferOwnership(ownerEOA);
+        address signer = vm.addr(QUOTER_PRIVATE_KEY);
+        uint256 required = 0.25 ether;
+        // Sign a quote with universalPayeeAddress = bytes32(0).
+        bytes memory signedQuote =
+            _signedQuoteRawPayee(signer, bytes32(0), SRC_CHAIN_ID, CHAIN_ID, required, 1 hours);
 
-        uint256 beforeOwnerBalance = ownerEOA.balance;
+        quoter.addQuoter(signer);
 
-        vm.prank(ownerEOA);
-        relayer.withdraw();
+        address user = address(0xCAFE);
+        vm.deal(user, required);
 
-        assertEq(ownerEOA.balance, beforeOwnerBalance + amount);
+        uint256 ownerBalanceBefore = newOwner.balance;
+
+        vm.prank(user);
+        relayer.requestDelivery{value: required}(address(this), CHAIN_ID, 0, 7, signedQuote);
+
+        assertEq(newOwner.balance, ownerBalanceBefore + required, "owner receives the fee");
         assertEq(address(relayer).balance, 0);
     }
 
-    function testWithdrawSendsBalanceToFeeRecipientWhenSet() public {
+    function testWithdrawSendsBalanceToOwner() public {
         uint256 amount = 1 ether;
         vm.deal(address(relayer), amount);
 
-        address feeRecipient = address(0xD00D);
-        relayer.setFeeRecipient(feeRecipient);
+        // Move ownership to a plain EOA so the contract can forward ETH to it.
+        address newOwner = address(0xABCD);
+        relayer.transferOwnership(newOwner);
+        vm.prank(newOwner);
+        relayer.acceptOwnership();
 
-        address owner = relayer.owner();
-        uint256 beforeOwnerBalance = owner.balance;
-        uint256 beforeRecipientBalance = feeRecipient.balance;
+        uint256 beforeOwnerBalance = newOwner.balance;
 
         relayer.withdraw();
 
-        assertEq(feeRecipient.balance, beforeRecipientBalance + amount);
-        assertEq(owner.balance, beforeOwnerBalance);
+        assertEq(newOwner.balance, beforeOwnerBalance + amount);
         assertEq(address(relayer).balance, 0);
-    }
-
-    function testSetFeeRecipientEmitsEvent() public {
-        address feeRecipient = address(0xFEE1);
-
-        vm.expectEmit(true, false, false, true);
-        emit FeeRecipientSet(feeRecipient);
-
-        relayer.setFeeRecipient(feeRecipient);
-    }
-
-    function testSetDefaultDeliveryFeeEmitsEvent() public {
-        uint256 fee = 1 ether;
-
-        vm.expectEmit(false, false, false, true);
-        emit DefaultDeliveryFeeSet(fee);
-
-        relayer.setDefaultDeliveryFee(fee);
-    }
-
-    function testSetDeliveryFeeEmitsEvent() public {
-        uint16 chainId = CHAIN_ID;
-        uint256 fee = 1 ether;
-
-        vm.expectEmit(false, false, false, true);
-        emit DeliveryFeeSet(chainId, fee);
-
-        relayer.setDeliveryFee(chainId, fee);
-    }
-
-    function testSetDefaultDeliveryFeeRevertsWhenBelowMinimum() public {
-        vm.expectRevert(abi.encodeWithSelector(SpecialRelayer.FeeBelowMinimum.selector, 0, 1));
-        relayer.setDefaultDeliveryFee(0);
-    }
-
-    function testSetDeliveryFeeAllowsZeroForFallback() public {
-        relayer.setDeliveryFee(CHAIN_ID, 0);
-        assertEq(relayer.deliveryFeePerChain(CHAIN_ID), 0);
-    }
-
-    function testSetDeliveryFeeAcceptsMinimumFee() public {
-        relayer.setDeliveryFee(CHAIN_ID, 1);
-        assertEq(relayer.deliveryFeePerChain(CHAIN_ID), 1);
-    }
-
-    function testMinimumFeeConstant() public {
-        assertEq(relayer.MINIMUM_FEE(), 1);
     }
 
     function _signedQuote(address signer, address payee, uint16 dstChain, uint256 requiredPayment, uint64 expiresIn)

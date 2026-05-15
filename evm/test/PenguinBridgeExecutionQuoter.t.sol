@@ -80,14 +80,14 @@ contract PenguinBridgeExecutionQuoterTest is Test {
         assertEq(quoteBody, bytes32(0), "quote body should be zero placeholder");
     }
 
-    function testRequestExecutionQuoteReturnsZeroPayeeWhenUnset() public {
+    function testRequestExecutionQuoteFallsBackToOwnerPayeeWhenUnset() public {
         _pushDefaultPrice();
 
         (, bytes32 returnedPayee,) = quoter.requestExecutionQuote(
             DST_CHAIN, bytes32(0), address(0), abi.encode(uint256(0)), abi.encode(uint256(100_000))
         );
 
-        assertEq(returnedPayee, bytes32(0));
+        assertEq(returnedPayee, bytes32(uint256(uint160(quoter.owner()))));
     }
 
     // ============================================================

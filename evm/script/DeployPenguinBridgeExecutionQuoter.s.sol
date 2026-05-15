@@ -40,7 +40,7 @@ contract DeployPenguinBridgeExecutionQuoter is Script {
         address newOwner = vm.envOr("EXECUTION_QUOTER_OWNER", address(0));
         if (newOwner != address(0)) {
             quoter.transferOwnership(newOwner);
-            console2.log("Ownership transferred to:", newOwner);
+            console2.log("Ownership transfer started to:", newOwner);
         }
 
         vm.stopBroadcast();

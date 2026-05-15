@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache 2
 pragma solidity >=0.8.19 <0.9.0;
 
-import "openzeppelin-contracts/contracts/access/Ownable.sol";
+import "openzeppelin-contracts/contracts/access/Ownable2Step.sol";
 import "openzeppelin-contracts/contracts/security/ReentrancyGuard.sol";
 import "openzeppelin-contracts/contracts/utils/cryptography/ECDSA.sol";
 
@@ -16,25 +16,12 @@ import "../interfaces/ISpecialRelayer.sol";
 /// @dev Deploy one per source chain. Set this contract's address as the WormholeTransceiver's
 ///      specialRelayer at deploy time, then enable special relaying per destination chain via
 ///      transceiver.setIsSpecialRelayingEnabled(chainId, true).
-contract SpecialRelayer is ISpecialRelayer, Ownable, ReentrancyGuard {
+contract SpecialRelayer is ISpecialRelayer, Ownable2Step, ReentrancyGuard {
     using ECDSA for bytes32;
-
-    /// @notice Minimum fee that can be set. Deploy a new relayer to change this.
-    uint256 public constant MINIMUM_FEE = 1;
 
     bytes4 public constant SIGNED_QUOTE_PREFIX = 0x50513031; // "PQ01"
     uint256 public constant SIGNED_QUOTE_BODY_LENGTH = 100;
     uint256 public constant SIGNED_QUOTE_LENGTH = SIGNED_QUOTE_BODY_LENGTH + 65;
-
-    /// @notice Default delivery fee in wei when no per-chain fee is set.
-    uint256 public defaultDeliveryFee;
-
-    /// @notice Per-chain delivery fee override (target chain id => fee in wei).
-    ///         If zero for a chain, defaultDeliveryFee is used.
-    mapping(uint16 => uint256) public deliveryFeePerChain;
-
-    /// @notice Address that receives withdrawn fees. If zero, withdraw sends to owner().
-    address public feeRecipient;
 
     /// @notice Canonical execution pricing source and quote signer registry.
     IPenguinBridgeExecutionQuoter public penguinBridgeExecutionQuoter;
@@ -57,15 +44,6 @@ contract SpecialRelayer is ISpecialRelayer, Ownable, ReentrancyGuard {
         address indexed sourceContract, uint16 indexed targetChain, uint64 indexed sequence, uint256 payment
     );
 
-    /// @notice Emitted when the default delivery fee is updated.
-    event DefaultDeliveryFeeSet(uint256 fee);
-
-    /// @notice Emitted when a per-chain delivery fee is set.
-    event DeliveryFeeSet(uint16 chainId, uint256 fee);
-
-    /// @notice Emitted when the fee recipient is updated.
-    event FeeRecipientSet(address indexed recipient);
-
     /// @notice Emitted when the execution quoter is updated.
     event ExecutionQuoterSet(address indexed executionQuoter);
 
@@ -85,8 +63,6 @@ contract SpecialRelayer is ISpecialRelayer, Ownable, ReentrancyGuard {
 
     error InsufficientPayment(uint256 required, uint256 received);
     error RefundFailed(address recipient, uint256 amount);
-    error FeeBelowMinimum(uint256 fee, uint256 minimum);
-    error LengthMismatch();
     error InvalidQuoteLength(uint256 length);
     error InvalidQuotePrefix(bytes4 prefix);
     error InvalidQuoteSourceChain(uint16 expected, uint16 actual);
@@ -97,6 +73,7 @@ contract SpecialRelayer is ISpecialRelayer, Ownable, ReentrancyGuard {
     error QuotePaymentFailed(address payee, uint256 payment);
     error SignedQuoteRequired();
     error SourceChainIdNotSet();
+    error ExecutionQuoterNotSet();
     error WithdrawFailed();
 
     constructor() Ownable() {}
@@ -134,32 +111,30 @@ contract SpecialRelayer is ISpecialRelayer, Ownable, ReentrancyGuard {
         bytes memory relayInstructions
     ) internal view returns (uint256 nativePriceQuote) {
         IPenguinBridgeExecutionQuoter executionQuoter = penguinBridgeExecutionQuoter;
-        if (address(executionQuoter) != address(0)) {
-            return executionQuoter.requestQuote(
-                targetChain, dstAddr, address(0), abi.encode(additionalValue), relayInstructions
-            );
+        if (address(executionQuoter) == address(0)) {
+            revert ExecutionQuoterNotSet();
         }
-
-        uint256 fee = deliveryFeePerChain[targetChain];
-        if (fee == 0) {
-            fee = defaultDeliveryFee;
-        }
-        return fee;
+        return executionQuoter.requestQuote(
+            targetChain, dstAddr, address(0), abi.encode(additionalValue), relayInstructions
+        );
     }
 
     /// @inheritdoc ISpecialRelayer
     function requestDelivery(
-        address sourceContract,
-        uint16 targetChain,
+        address,
+        /* sourceContract */
+        uint16,
+        /* targetChain */
         uint256,
         /* additionalValue */
-        uint64 sequence
+        uint64 /* sequence */
     )
         external
         payable
         nonReentrant
     {
-        _requestDelivery(sourceContract, targetChain, sequence, new bytes(0));
+        // Fixed-fee mode has been removed; all delivery requests must include a signed quote.
+        revert SignedQuoteRequired();
     }
 
     /// @inheritdoc ISpecialRelayer
@@ -180,20 +155,13 @@ contract SpecialRelayer is ISpecialRelayer, Ownable, ReentrancyGuard {
         uint64 sequence,
         bytes memory signedQuoteBytes
     ) internal {
-        IPenguinBridgeExecutionQuoter executionQuoter = penguinBridgeExecutionQuoter;
-        if (address(executionQuoter) == address(0)) {
-            uint256 fallbackRequired = _quoteDeliveryPrice(targetChain, 0, bytes32(0), new bytes(0));
-            if (msg.value < fallbackRequired) {
-                revert InsufficientPayment(fallbackRequired, msg.value);
-            }
-
-            emit DeliveryRequested(sourceContract, targetChain, sequence, msg.value);
-            // Any excess value stays in the contract and can be withdrawn by owner.
-            return;
-        }
-
         if (signedQuoteBytes.length == 0) {
             revert SignedQuoteRequired();
+        }
+
+        IPenguinBridgeExecutionQuoter executionQuoter = penguinBridgeExecutionQuoter;
+        if (address(executionQuoter) == address(0)) {
+            revert ExecutionQuoterNotSet();
         }
 
         uint16 expectedSrcChain = sourceChainId;
@@ -228,6 +196,10 @@ contract SpecialRelayer is ISpecialRelayer, Ownable, ReentrancyGuard {
             revert InvalidPayeeAddress(q.universalPayeeAddress);
         }
         address payee = address(uint160(uint256(q.universalPayeeAddress)));
+        // Fall back to the contract owner when the signer leaves the payee unset.
+        if (payee == address(0)) {
+            payee = owner();
+        }
 
         // Forward exactly the quoted amount to the payee; refund any excess to the caller
         // so users aren't penalized for overpaying.
@@ -293,7 +265,7 @@ contract SpecialRelayer is ISpecialRelayer, Ownable, ReentrancyGuard {
         return hash.recover(v, r, s);
     }
 
-    /// @notice Set the execution quoter. Pass address(0) to use fixed-fee fallback mode.
+    /// @notice Set the canonical execution quoter that signs and prices deliveries.
     function setExecutionQuoter(address executionQuoter) external onlyOwner {
         penguinBridgeExecutionQuoter = IPenguinBridgeExecutionQuoter(executionQuoter);
         emit ExecutionQuoterSet(executionQuoter);
@@ -307,48 +279,9 @@ contract SpecialRelayer is ISpecialRelayer, Ownable, ReentrancyGuard {
         emit SourceChainIdSet(chainId);
     }
 
-    /// @notice Set the default delivery fee (used when no per-chain fee is set).
-    function setDefaultDeliveryFee(uint256 fee) external onlyOwner {
-        if (fee < MINIMUM_FEE) {
-            revert FeeBelowMinimum(fee, MINIMUM_FEE);
-        }
-        defaultDeliveryFee = fee;
-        emit DefaultDeliveryFeeSet(fee);
-    }
-
-    /// @notice Set the delivery fee for a specific target chain. Use 0 to fall back to default.
-    function setDeliveryFee(uint16 chainId, uint256 fee) external onlyOwner {
-        if (fee != 0 && fee < MINIMUM_FEE) {
-            revert FeeBelowMinimum(fee, MINIMUM_FEE);
-        }
-        deliveryFeePerChain[chainId] = fee;
-        emit DeliveryFeeSet(chainId, fee);
-    }
-
-    /// @notice Set delivery fees for multiple target chains in one call. Use 0 for a fee to fall back to default.
-    function setDeliveryFees(uint16[] calldata chainIds, uint256[] calldata fees) external onlyOwner {
-        if (chainIds.length != fees.length) {
-            revert LengthMismatch();
-        }
-        for (uint256 i = 0; i < chainIds.length; i++) {
-            if (fees[i] != 0 && fees[i] < MINIMUM_FEE) {
-                revert FeeBelowMinimum(fees[i], MINIMUM_FEE);
-            }
-            deliveryFeePerChain[chainIds[i]] = fees[i];
-            emit DeliveryFeeSet(chainIds[i], fees[i]);
-        }
-    }
-
-    /// @notice Set the address that receives withdrawn fees. Pass address(0) to use owner().
-    function setFeeRecipient(address recipient) external onlyOwner {
-        feeRecipient = recipient;
-        emit FeeRecipientSet(recipient);
-    }
-
-    /// @notice Withdraw native balance to the fee recipient, or to the owner if fee recipient is not set.
+    /// @notice Withdraw native balance to the contract owner.
     function withdraw() external {
-        address to = feeRecipient != address(0) ? feeRecipient : owner();
-        (bool ok,) = to.call{value: address(this).balance}("");
+        (bool ok,) = owner().call{value: address(this).balance}("");
         if (!ok) {
             revert WithdrawFailed();
         }
