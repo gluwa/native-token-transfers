@@ -96,10 +96,10 @@ npm run dev --workspace=quoter-service
 
 ## Deployment (Docker / Azure)
 
-A multi-stage Dockerfile is included. The runtime image is `node:20-alpine` and runs as a non-root user. Build:
+A multi-stage Dockerfile is included. The runtime image is `node:20-alpine` and runs as a non-root user. Build from the repo root (the workspace's tsconfigs extend the root tsconfigs, so the build context must include both):
 
 ```bash
-docker build -t ntt-quoter-service:latest -f quoter-service/Dockerfile quoter-service/
+docker build -t ntt-quoter-service:latest -f quoter-service/Dockerfile .
 ```
 
 Run with env vars:

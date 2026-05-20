@@ -26,14 +26,17 @@ class HttpStatusError extends Error {
   }
 }
 class JsonRpcError extends Error {
-  constructor(message: string, public readonly rpcCode: number = -32000) {
+  constructor(
+    message: string,
+    public readonly rpcCode: number = -32000
+  ) {
     super(message);
   }
 }
 
 async function withMockRpc(
   handler: RpcHandler,
-  fn: (url: string, requests: RpcRequest[]) => Promise<void>,
+  fn: (url: string, requests: RpcRequest[]) => Promise<void>
 ): Promise<void> {
   const requests: RpcRequest[] = [];
   const server: Server = createServer((req, res) => {
@@ -52,7 +55,11 @@ async function withMockRpc(
             return { jsonrpc: "2.0", id: item.id, result };
           } catch (err) {
             if (err instanceof JsonRpcError) {
-              return { jsonrpc: "2.0", id: item.id, error: { code: err.rpcCode, message: err.message } };
+              return {
+                jsonrpc: "2.0",
+                id: item.id,
+                error: { code: err.rpcCode, message: err.message },
+              };
             }
             throw err;
           }
@@ -97,7 +104,7 @@ function makeBaseHandler(callResult: string): RpcHandler {
 
 async function withQuoter(
   opts: RpcOnChainQuoterOptions,
-  fn: (q: RpcOnChainQuoter) => Promise<void>,
+  fn: (q: RpcOnChainQuoter) => Promise<void>
 ): Promise<void> {
   const q = new RpcOnChainQuoter(opts);
   try {
@@ -109,33 +116,41 @@ async function withQuoter(
 
 describe("RpcOnChainQuoter.fetchRequiredPayment", () => {
   it("encodes the contract call with the expected arguments", async () => {
-    const expectedResult = iface.encodeFunctionResult("requestQuote", [123_456_789n]);
+    const expectedResult = iface.encodeFunctionResult("requestQuote", [
+      123_456_789n,
+    ]);
     await withMockRpc(makeBaseHandler(expectedResult), async (url, reqs) => {
-      await withQuoter({ rpcUrl: url, contractAddress: CONTRACT, staticNetwork: true }, async (quoter) => {
-        const got = await quoter.fetchRequiredPayment({
-          dstChain: 5,
-          dstAddr: "0x" + "ab".repeat(20),
-          msgValue: 1_000_000_000_000_000_000n,
-          gasLimit: 300_000n,
-        });
-        expect(got).toBe(123_456_789n);
+      await withQuoter(
+        { rpcUrl: url, contractAddress: CONTRACT, staticNetwork: true },
+        async (quoter) => {
+          const got = await quoter.fetchRequiredPayment({
+            dstChain: 5,
+            dstAddr: "0x" + "ab".repeat(20),
+            msgValue: 1_000_000_000_000_000_000n,
+            gasLimit: 300_000n,
+          });
+          expect(got).toBe(123_456_789n);
 
-        const ethCall = reqs.find((r) => r.method === "eth_call");
-        expect(ethCall).toBeDefined();
-        const params = ethCall!.params as Array<{ to: string; data: string }>;
-        expect(getAddress(params[0].to)).toBe(getAddress(CONTRACT));
+          const ethCall = reqs.find((r) => r.method === "eth_call");
+          expect(ethCall).toBeDefined();
+          const params = ethCall!.params as Array<{ to: string; data: string }>;
+          const call = params[0]!;
+          expect(getAddress(call.to)).toBe(getAddress(CONTRACT));
 
-        const decoded = iface.decodeFunctionData("requestQuote", params[0].data);
-        expect(decoded[0]).toBe(5n);
-        // dstAddr is left-padded from 20 bytes to bytes32
-        expect(decoded[1].toLowerCase()).toBe(zeroPadValue("0x" + "ab".repeat(20), 32).toLowerCase());
-        // refundAddr defaults to zero
-        expect(decoded[2]).toBe("0x0000000000000000000000000000000000000000");
-        // requestBytes = abi.encode(uint256(msgValue))
-        expect(BigInt(decoded[3])).toBe(1_000_000_000_000_000_000n);
-        // relayInstructions = abi.encode(uint256(gasLimit))
-        expect(BigInt(decoded[4])).toBe(300_000n);
-      });
+          const decoded = iface.decodeFunctionData("requestQuote", call.data);
+          expect(decoded[0]).toBe(5n);
+          // dstAddr is left-padded from 20 bytes to bytes32
+          expect(decoded[1].toLowerCase()).toBe(
+            zeroPadValue("0x" + "ab".repeat(20), 32).toLowerCase()
+          );
+          // refundAddr defaults to zero
+          expect(decoded[2]).toBe("0x0000000000000000000000000000000000000000");
+          // requestBytes = abi.encode(uint256(msgValue))
+          expect(BigInt(decoded[3])).toBe(1_000_000_000_000_000_000n);
+          // relayInstructions = abi.encode(uint256(gasLimit))
+          expect(BigInt(decoded[4])).toBe(300_000n);
+        }
+      );
     });
   });
 
@@ -170,7 +185,7 @@ describe("RpcOnChainQuoter.fetchRequiredPayment", () => {
           });
           expect(got).toBe(42n);
           expect(ethCallAttempts).toBe(3);
-        },
+        }
       );
     });
   });
@@ -202,11 +217,11 @@ describe("RpcOnChainQuoter.fetchRequiredPayment", () => {
               dstAddr: "0x" + "ab".repeat(20),
               msgValue: 0n,
               gasLimit: 100_000n,
-            }),
+            })
           ).rejects.toThrow();
           // Exactly one attempt — no retries on contract revert.
           expect(attempts).toBe(1);
-        },
+        }
       );
     });
   });
@@ -216,25 +231,33 @@ describe("RpcOnChainQuoter.assertAuthorized", () => {
   it("resolves silently when the quoter is registered", async () => {
     const result = iface.encodeFunctionResult("isAuthorizedQuoter", [true]);
     await withMockRpc(makeBaseHandler(result), async (url, reqs) => {
-      await withQuoter({ rpcUrl: url, contractAddress: CONTRACT, staticNetwork: true }, async (quoter) => {
-        await expect(quoter.assertAuthorized(QUOTER)).resolves.toBeUndefined();
+      await withQuoter(
+        { rpcUrl: url, contractAddress: CONTRACT, staticNetwork: true },
+        async (quoter) => {
+          await expect(
+            quoter.assertAuthorized(QUOTER)
+          ).resolves.toBeUndefined();
 
-        const ethCall = reqs.find((r) => r.method === "eth_call");
-        const data = (ethCall!.params as Array<{ data: string }>)[0].data;
-        const decoded = iface.decodeFunctionData("isAuthorizedQuoter", data);
-        expect(getAddress(decoded[0])).toBe(getAddress(QUOTER));
-      });
+          const ethCall = reqs.find((r) => r.method === "eth_call");
+          const data = (ethCall!.params as Array<{ data: string }>)[0]!.data;
+          const decoded = iface.decodeFunctionData("isAuthorizedQuoter", data);
+          expect(getAddress(decoded[0])).toBe(getAddress(QUOTER));
+        }
+      );
     });
   });
 
   it("throws QuoterNotAuthorizedError when registration is missing", async () => {
     const result = iface.encodeFunctionResult("isAuthorizedQuoter", [false]);
     await withMockRpc(makeBaseHandler(result), async (url) => {
-      await withQuoter({ rpcUrl: url, contractAddress: CONTRACT, staticNetwork: true }, async (quoter) => {
-        await expect(quoter.assertAuthorized(QUOTER)).rejects.toBeInstanceOf(
-          QuoterNotAuthorizedError,
-        );
-      });
+      await withQuoter(
+        { rpcUrl: url, contractAddress: CONTRACT, staticNetwork: true },
+        async (quoter) => {
+          await expect(quoter.assertAuthorized(QUOTER)).rejects.toBeInstanceOf(
+            QuoterNotAuthorizedError
+          );
+        }
+      );
     });
   });
 });

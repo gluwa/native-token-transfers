@@ -1,28 +1,15 @@
-import type { Config } from "jest";
+import type { JestConfigWithTsJest } from "ts-jest";
 
-const config: Config = {
-  preset: "ts-jest/presets/default-esm",
-  testEnvironment: "node",
-  extensionsToTreatAsEsm: [".ts"],
+const jestConfig: JestConfigWithTsJest = {
+  roots: ["./__tests__"],
+  testMatch: ["**/*.test.ts"],
+  preset: "ts-jest",
   moduleNameMapper: {
     "^(\\.{1,2}/.*)\\.js$": "$1",
   },
   transform: {
-    "^.+\\.ts$": [
-      "ts-jest",
-      {
-        useESM: true,
-        tsconfig: {
-          module: "ES2022",
-          target: "ES2022",
-          moduleResolution: "node",
-          esModuleInterop: true,
-          strict: true,
-        },
-      },
-    ],
+    "^.+\\.tsx?$": ["ts-jest", { tsconfig: "tsconfig.test.json" }],
   },
-  testMatch: ["**/__tests__/**/*.test.ts"],
 };
 
-export default config;
+export default jestConfig;

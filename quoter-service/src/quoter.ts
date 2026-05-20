@@ -70,10 +70,13 @@ function encodeUint256(value: bigint): string {
 }
 
 export class QuoterNotAuthorizedError extends Error {
-  constructor(public readonly quoterAddress: string, public readonly contractAddress: string) {
+  constructor(
+    public readonly quoterAddress: string,
+    public readonly contractAddress: string
+  ) {
     super(
       `quoter ${quoterAddress} is not in PenguinBridgeExecutionQuoter(${contractAddress})` +
-        `.authorizedQuoters — register it via addQuoter() or rotate the signing key`,
+        `.authorizedQuoters — register it via addQuoter() or rotate the signing key`
     );
     this.name = "QuoterNotAuthorizedError";
   }
@@ -87,9 +90,15 @@ export class RpcOnChainQuoter implements OnChainQuoter {
 
   constructor(opts: RpcOnChainQuoterOptions) {
     this.provider = opts.staticNetwork
-      ? new JsonRpcProvider(opts.rpcUrl, Network.from(31337), { staticNetwork: true })
+      ? new JsonRpcProvider(opts.rpcUrl, Network.from(31337), {
+          staticNetwork: true,
+        })
       : new JsonRpcProvider(opts.rpcUrl);
-    this.contract = new Contract(getAddress(opts.contractAddress), QUOTER_ABI, this.provider);
+    this.contract = new Contract(
+      getAddress(opts.contractAddress),
+      QUOTER_ABI,
+      this.provider
+    );
     this.retry = { ...DEFAULT_RETRY, ...(opts.retry ?? {}) };
     this.sleep = opts.sleep;
   }
@@ -104,15 +113,15 @@ export class RpcOnChainQuoter implements OnChainQuoter {
     const relayInstructions = encodeUint256(req.gasLimit);
     return withRetry(
       () =>
-        this.contract.requestQuote(
+        this.contract["requestQuote"]!(
           req.dstChain,
           dstAddr,
           UNUSED_REFUND_ADDR,
           requestBytes,
-          relayInstructions,
+          relayInstructions
         ) as Promise<bigint>,
       this.retry,
-      this.sleep,
+      this.sleep
     );
   }
 
@@ -122,9 +131,9 @@ export class RpcOnChainQuoter implements OnChainQuoter {
   async assertAuthorized(quoterAddress: string): Promise<void> {
     const addr = getAddress(quoterAddress);
     const ok = (await withRetry(
-      () => this.contract.isAuthorizedQuoter(addr) as Promise<boolean>,
+      () => this.contract["isAuthorizedQuoter"]!(addr) as Promise<boolean>,
       this.retry,
-      this.sleep,
+      this.sleep
     )) as boolean;
     if (!ok) {
       const contractAddress = (await this.contract.getAddress()) as string;

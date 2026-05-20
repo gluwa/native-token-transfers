@@ -6,7 +6,7 @@ import type { OnChainQuoter, QuoteRequest } from "../src/quoter.js";
 import { createQuoterServer } from "../src/server.js";
 import { SIGNED_QUOTE_LENGTH, decodeSignedQuote } from "../src/signedQuote.js";
 
-const QUOTER_PRIVATE_KEY = "0x" + (0xa11cen).toString(16).padStart(64, "0");
+const QUOTER_PRIVATE_KEY = "0x" + 0xa11cen.toString(16).padStart(64, "0");
 
 function buildConfig(): QuoterServiceConfig {
   const wallet = new Wallet(QUOTER_PRIVATE_KEY);
@@ -26,9 +26,7 @@ function buildConfig(): QuoterServiceConfig {
 
 class StubQuoter implements OnChainQuoter {
   public lastRequest: QuoteRequest | undefined;
-  constructor(
-    private readonly result: bigint | Error,
-  ) {}
+  constructor(private readonly result: bigint | Error) {}
   async fetchRequiredPayment(req: QuoteRequest): Promise<bigint> {
     this.lastRequest = req;
     if (this.result instanceof Error) throw this.result;
@@ -40,11 +38,19 @@ class StubQuoter implements OnChainQuoter {
 }
 
 async function withServer(
-  opts: { quoter: OnChainQuoter; config?: QuoterServiceConfig; now?: () => number },
-  fn: (baseUrl: string) => Promise<void>,
+  opts: {
+    quoter: OnChainQuoter;
+    config?: QuoterServiceConfig;
+    now?: () => number;
+  },
+  fn: (baseUrl: string) => Promise<void>
 ): Promise<void> {
   const config = opts.config ?? buildConfig();
-  const server = createQuoterServer({ config, quoter: opts.quoter, now: opts.now });
+  const server = createQuoterServer({
+    config,
+    quoter: opts.quoter,
+    now: opts.now,
+  });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
     const addr = server.address() as AddressInfo;
@@ -59,46 +65,53 @@ describe("POST /quote", () => {
     const config = buildConfig();
     const quoter = new StubQuoter(123_456_789n);
     const fixedNow = 1_700_000_000;
-    await withServer({ config, quoter, now: () => fixedNow }, async (baseUrl) => {
-      const res = await fetch(`${baseUrl}/quote`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
+    await withServer(
+      { config, quoter, now: () => fixedNow },
+      async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/quote`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            dstChain: 5,
+            dstAddr: "0x" + "ab".repeat(20),
+            msgValue: "1000000000000000000",
+            gasLimit: 300000,
+          }),
+        });
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as {
+          signedQuoteBytes: string;
+          requiredPayment: string;
+          expiryTime: string;
+          srcChain: number;
+          dstChain: number;
+        };
+        expect(getBytes(body.signedQuoteBytes).length).toBe(
+          SIGNED_QUOTE_LENGTH
+        );
+        expect(body.requiredPayment).toBe("123456789");
+        expect(body.expiryTime).toBe(String(fixedNow + config.validitySeconds));
+        expect(body.srcChain).toBe(config.srcChain);
+        expect(body.dstChain).toBe(5);
+
+        const decoded = decodeSignedQuote(body.signedQuoteBytes);
+        expect(decoded.quoterAddress).toBe(config.quoterAddress);
+        expect(decoded.payeeAddress).toBe(config.payeeAddress);
+        expect(decoded.srcChain).toBe(config.srcChain);
+        expect(decoded.dstChain).toBe(5);
+        expect(decoded.expiryTime).toBe(
+          BigInt(fixedNow + config.validitySeconds)
+        );
+        expect(decoded.requiredPayment).toBe(123_456_789n);
+
+        expect(quoter.lastRequest).toEqual({
           dstChain: 5,
           dstAddr: "0x" + "ab".repeat(20),
-          msgValue: "1000000000000000000",
-          gasLimit: 300000,
-        }),
-      });
-      expect(res.status).toBe(200);
-      const body = (await res.json()) as {
-        signedQuoteBytes: string;
-        requiredPayment: string;
-        expiryTime: string;
-        srcChain: number;
-        dstChain: number;
-      };
-      expect(getBytes(body.signedQuoteBytes).length).toBe(SIGNED_QUOTE_LENGTH);
-      expect(body.requiredPayment).toBe("123456789");
-      expect(body.expiryTime).toBe(String(fixedNow + config.validitySeconds));
-      expect(body.srcChain).toBe(config.srcChain);
-      expect(body.dstChain).toBe(5);
-
-      const decoded = decodeSignedQuote(body.signedQuoteBytes);
-      expect(decoded.quoterAddress).toBe(config.quoterAddress);
-      expect(decoded.payeeAddress).toBe(config.payeeAddress);
-      expect(decoded.srcChain).toBe(config.srcChain);
-      expect(decoded.dstChain).toBe(5);
-      expect(decoded.expiryTime).toBe(BigInt(fixedNow + config.validitySeconds));
-      expect(decoded.requiredPayment).toBe(123_456_789n);
-
-      expect(quoter.lastRequest).toEqual({
-        dstChain: 5,
-        dstAddr: "0x" + "ab".repeat(20),
-        msgValue: 1_000_000_000_000_000_000n,
-        gasLimit: 300_000n,
-      });
-    });
+          msgValue: 1_000_000_000_000_000_000n,
+          gasLimit: 300_000n,
+        });
+      }
+    );
   });
 
   it("rejects malformed input with 400", async () => {
@@ -129,7 +142,7 @@ describe("POST /quote", () => {
         expect(res.status).toBe(502);
         const body = (await res.json()) as { error: string };
         expect(body.error).toContain("upstream");
-      },
+      }
     );
   });
 

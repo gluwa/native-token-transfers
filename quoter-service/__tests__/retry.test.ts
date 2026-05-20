@@ -18,15 +18,24 @@ describe("isTransientRpcError", () => {
 });
 
 describe("withRetry", () => {
-  const opts = { ...DEFAULT_RETRY, maxAttempts: 4, initialDelayMs: 10, maxDelayMs: 100 };
+  const opts = {
+    ...DEFAULT_RETRY,
+    maxAttempts: 4,
+    initialDelayMs: 10,
+    maxDelayMs: 100,
+  };
   const noSleep = (_ms: number): Promise<void> => Promise.resolve();
 
   it("returns the first successful value without retrying", async () => {
     let calls = 0;
-    const result = await withRetry(async () => {
-      calls += 1;
-      return "ok";
-    }, opts, noSleep);
+    const result = await withRetry(
+      async () => {
+        calls += 1;
+        return "ok";
+      },
+      opts,
+      noSleep
+    );
     expect(result).toBe("ok");
     expect(calls).toBe(1);
   });
@@ -35,35 +44,49 @@ describe("withRetry", () => {
     let calls = 0;
     const err = Object.assign(new Error("rpc down"), { code: "NETWORK_ERROR" });
     await expect(
-      withRetry(async () => {
-        calls += 1;
-        throw err;
-      }, opts, noSleep),
+      withRetry(
+        async () => {
+          calls += 1;
+          throw err;
+        },
+        opts,
+        noSleep
+      )
     ).rejects.toBe(err);
     expect(calls).toBe(opts.maxAttempts);
   });
 
   it("recovers after a transient failure followed by a success", async () => {
     let calls = 0;
-    const result = await withRetry(async () => {
-      calls += 1;
-      if (calls < 3) {
-        throw Object.assign(new Error("flap"), { code: "SERVER_ERROR" });
-      }
-      return 42;
-    }, opts, noSleep);
+    const result = await withRetry(
+      async () => {
+        calls += 1;
+        if (calls < 3) {
+          throw Object.assign(new Error("flap"), { code: "SERVER_ERROR" });
+        }
+        return 42;
+      },
+      opts,
+      noSleep
+    );
     expect(result).toBe(42);
     expect(calls).toBe(3);
   });
 
   it("does not retry on contract reverts", async () => {
     let calls = 0;
-    const err = Object.assign(new Error("reverted"), { code: "CALL_EXCEPTION" });
+    const err = Object.assign(new Error("reverted"), {
+      code: "CALL_EXCEPTION",
+    });
     await expect(
-      withRetry(async () => {
-        calls += 1;
-        throw err;
-      }, opts, noSleep),
+      withRetry(
+        async () => {
+          calls += 1;
+          throw err;
+        },
+        opts,
+        noSleep
+      )
     ).rejects.toBe(err);
     expect(calls).toBe(1);
   });
@@ -80,10 +103,15 @@ describe("withRetry", () => {
     // Pin jitter to 1.0 so the test can assert exact backoff math without flakiness.
     const noJitter = (): number => 1.0;
     await expect(
-      withRetry(async () => {
-        calls += 1;
-        throw err;
-      }, retryOpts, sleep, noJitter),
+      withRetry(
+        async () => {
+          calls += 1;
+          throw err;
+        },
+        retryOpts,
+        sleep,
+        noJitter
+      )
     ).rejects.toBe(err);
     expect(calls).toBe(5);
     // No sleep after the final attempt — only 4 backoff windows.
@@ -102,9 +130,14 @@ describe("withRetry", () => {
     const jitters = [0.75, 1.25, 0.75];
     let idx = 0;
     await expect(
-      withRetry(async () => {
-        throw err;
-      }, retryOpts, sleep, () => jitters[idx++]!),
+      withRetry(
+        async () => {
+          throw err;
+        },
+        retryOpts,
+        sleep,
+        () => jitters[idx++]!
+      )
     ).rejects.toBe(err);
     expect(delays).toEqual([75, 125, 75]);
   });
@@ -113,10 +146,14 @@ describe("withRetry", () => {
     let calls = 0;
     const err = Object.assign(new Error("flap"), { code: "TIMEOUT" });
     await expect(
-      withRetry(async () => {
-        calls += 1;
-        throw err;
-      }, { maxAttempts: 1, initialDelayMs: 10, maxDelayMs: 10 }, noSleep),
+      withRetry(
+        async () => {
+          calls += 1;
+          throw err;
+        },
+        { maxAttempts: 1, initialDelayMs: 10, maxDelayMs: 10 },
+        noSleep
+      )
     ).rejects.toBe(err);
     expect(calls).toBe(1);
   });

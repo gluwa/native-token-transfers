@@ -1,4 +1,9 @@
-import { IncomingMessage, ServerResponse, createServer, type Server } from "node:http";
+import {
+  IncomingMessage,
+  ServerResponse,
+  createServer,
+  type Server,
+} from "node:http";
 import { isHexString } from "ethers";
 
 import type { QuoterServiceConfig } from "./config.js";
@@ -45,7 +50,12 @@ function parseBigInt(name: string, raw: unknown): bigint {
 }
 
 function parseUint16(name: string, raw: unknown): number {
-  if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 0 || raw > 0xffff) {
+  if (
+    typeof raw !== "number" ||
+    !Number.isInteger(raw) ||
+    raw < 0 ||
+    raw > 0xffff
+  ) {
     throw new BadRequest(`${name} must be a uint16`);
   }
   return raw;
@@ -77,7 +87,8 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   // Cap request bodies; legitimate quote requests are tiny (< 1 KB).
   const MAX_BODY_BYTES = 16 * 1024;
   for await (const chunk of req) {
-    const buf = typeof chunk === "string" ? Buffer.from(chunk) : (chunk as Buffer);
+    const buf =
+      typeof chunk === "string" ? Buffer.from(chunk) : (chunk as Buffer);
     total += buf.length;
     if (total > MAX_BODY_BYTES) {
       throw new BadRequest("request body too large");
@@ -94,7 +105,7 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body, (_key, value) =>
-    typeof value === "bigint" ? value.toString() : value,
+    typeof value === "bigint" ? value.toString() : value
   );
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
@@ -106,12 +117,17 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 export function createQuoterServer(options: CreateServerOptions): Server {
   const { config, quoter, now = () => Math.floor(Date.now() / 1000) } = options;
 
-  const handleQuote = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+  const handleQuote = async (
+    req: IncomingMessage,
+    res: ServerResponse
+  ): Promise<void> => {
     let raw: unknown;
     try {
       raw = await readJsonBody(req);
     } catch (err) {
-      sendJson(res, 400, { error: err instanceof BadRequest ? err.message : "bad request" });
+      sendJson(res, 400, {
+        error: err instanceof BadRequest ? err.message : "bad request",
+      });
       return;
     }
 
@@ -119,7 +135,9 @@ export function createQuoterServer(options: CreateServerOptions): Server {
     try {
       parsed = parseQuoteRequest((raw ?? {}) as QuoteRequestBody).parsed;
     } catch (err) {
-      sendJson(res, 400, { error: err instanceof BadRequest ? err.message : "bad request" });
+      sendJson(res, 400, {
+        error: err instanceof BadRequest ? err.message : "bad request",
+      });
       return;
     }
 
@@ -144,7 +162,7 @@ export function createQuoterServer(options: CreateServerOptions): Server {
         expiryTime,
         requiredPayment,
       },
-      config.signingKey,
+      config.signingKey
     );
 
     sendJson(res, 200, {
@@ -159,7 +177,10 @@ export function createQuoterServer(options: CreateServerOptions): Server {
   };
 
   return createServer((req, res) => {
-    if (req.method === "GET" && (req.url === "/health" || req.url === "/healthz")) {
+    if (
+      req.method === "GET" &&
+      (req.url === "/health" || req.url === "/healthz")
+    ) {
       sendJson(res, 200, { status: "ok" });
       return;
     }

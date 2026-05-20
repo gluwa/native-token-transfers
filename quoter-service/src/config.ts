@@ -1,4 +1,10 @@
-import { SigningKey, Wallet, getAddress, isHexString, zeroPadValue } from "ethers";
+import {
+  SigningKey,
+  Wallet,
+  getAddress,
+  isHexString,
+  zeroPadValue,
+} from "ethers";
 
 import type { RetryOptions } from "./retry.js";
 
@@ -41,41 +47,49 @@ function parsePayeeAddress(raw: string): string {
     return zeroPadValue(raw, 32).toLowerCase();
   }
   throw new Error(
-    `QUOTER_PAYEE_ADDRESS must be a 20- or 32-byte hex string, got ${raw}`,
+    `QUOTER_PAYEE_ADDRESS must be a 20- or 32-byte hex string, got ${raw}`
   );
 }
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): QuoterServiceConfig {
+export function loadConfig(
+  env: NodeJS.ProcessEnv = process.env
+): QuoterServiceConfig {
   const wallet = new Wallet(required(env, "QUOTER_PRIVATE_KEY"));
   const srcChain = Number(required(env, "QUOTER_SRC_CHAIN"));
   if (!Number.isInteger(srcChain) || srcChain < 0 || srcChain > 0xffff) {
     throw new Error(`QUOTER_SRC_CHAIN must be a uint16, got ${srcChain}`);
   }
-  const validitySeconds = Number(env.QUOTER_VALIDITY_SECONDS ?? "120");
+  const validitySeconds = Number(env["QUOTER_VALIDITY_SECONDS"] ?? "120");
   // Cap at 1 hour. SpecialRelayer enforces no upper bound on expiry, so a misconfigured
   // service could mint quotes that remain submittable for arbitrarily long after the
   // underlying price is stale.
-  if (!Number.isInteger(validitySeconds) || validitySeconds <= 0 || validitySeconds > 3600) {
+  if (
+    !Number.isInteger(validitySeconds) ||
+    validitySeconds <= 0 ||
+    validitySeconds > 3600
+  ) {
     throw new Error(
-      `QUOTER_VALIDITY_SECONDS must be an integer in (0, 3600], got ${validitySeconds}`,
+      `QUOTER_VALIDITY_SECONDS must be an integer in (0, 3600], got ${validitySeconds}`
     );
   }
-  const port = Number(env.QUOTER_PORT ?? "3000");
+  const port = Number(env["QUOTER_PORT"] ?? "3000");
   if (!Number.isInteger(port) || port < 0 || port > 0xffff) {
     throw new Error(`QUOTER_PORT must be a uint16, got ${port}`);
   }
-  const maxAttempts = Number(env.QUOTER_RPC_MAX_ATTEMPTS ?? "3");
+  const maxAttempts = Number(env["QUOTER_RPC_MAX_ATTEMPTS"] ?? "3");
   if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
     throw new Error(`QUOTER_RPC_MAX_ATTEMPTS must be >= 1, got ${maxAttempts}`);
   }
-  const initialDelayMs = Number(env.QUOTER_RPC_INITIAL_DELAY_MS ?? "200");
+  const initialDelayMs = Number(env["QUOTER_RPC_INITIAL_DELAY_MS"] ?? "200");
   if (!Number.isInteger(initialDelayMs) || initialDelayMs < 0) {
-    throw new Error(`QUOTER_RPC_INITIAL_DELAY_MS must be >= 0, got ${initialDelayMs}`);
+    throw new Error(
+      `QUOTER_RPC_INITIAL_DELAY_MS must be >= 0, got ${initialDelayMs}`
+    );
   }
-  const maxDelayMs = Number(env.QUOTER_RPC_MAX_DELAY_MS ?? "2000");
+  const maxDelayMs = Number(env["QUOTER_RPC_MAX_DELAY_MS"] ?? "2000");
   if (!Number.isInteger(maxDelayMs) || maxDelayMs < initialDelayMs) {
     throw new Error(
-      `QUOTER_RPC_MAX_DELAY_MS must be an integer >= QUOTER_RPC_INITIAL_DELAY_MS, got ${maxDelayMs}`,
+      `QUOTER_RPC_MAX_DELAY_MS must be an integer >= QUOTER_RPC_INITIAL_DELAY_MS, got ${maxDelayMs}`
     );
   }
   return {
@@ -86,7 +100,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): QuoterServiceC
     contractAddress: getAddress(required(env, "QUOTER_CONTRACT_ADDRESS")),
     srcChain,
     validitySeconds,
-    host: env.QUOTER_HOST ?? "127.0.0.1",
+    host: env["QUOTER_HOST"] ?? "127.0.0.1",
     port,
     retry: { maxAttempts, initialDelayMs, maxDelayMs },
   };

@@ -1,4 +1,11 @@
-import { SigningKey, Wallet, keccak256, getBytes, recoverAddress, Signature } from "ethers";
+import {
+  SigningKey,
+  Wallet,
+  keccak256,
+  getBytes,
+  recoverAddress,
+  Signature,
+} from "ethers";
 import {
   SIGNED_QUOTE_BODY_LENGTH,
   SIGNED_QUOTE_LENGTH,
@@ -10,7 +17,7 @@ import {
 
 // Same fixture used by the on-chain SpecialRelayer foundry tests so the
 // signature this service produces is byte-identical to what the contract verifies.
-const QUOTER_PRIVATE_KEY = "0x" + (0xa11cen).toString(16).padStart(64, "0");
+const QUOTER_PRIVATE_KEY = "0x" + 0xa11cen.toString(16).padStart(64, "0");
 
 function fixtureBody() {
   return {
@@ -33,7 +40,9 @@ describe("encodeQuoteBody", () => {
 
     const hex = "0x" + Buffer.from(encoded).toString("hex");
     // bytes4 prefix
-    expect(hex.slice(0, 10).toLowerCase()).toBe(SIGNED_QUOTE_PREFIX.toLowerCase());
+    expect(hex.slice(0, 10).toLowerCase()).toBe(
+      SIGNED_QUOTE_PREFIX.toLowerCase()
+    );
     // address quoter at offset 4
     expect("0x" + hex.slice(10, 50)).toBe(body.quoterAddress.toLowerCase());
     // bytes32 payee at offset 24
@@ -49,11 +58,19 @@ describe("encodeQuoteBody", () => {
   });
 
   it("rejects out-of-range fields", () => {
-    expect(() => encodeQuoteBody({ ...fixtureBody(), srcChain: 0x10000 })).toThrow();
+    expect(() =>
+      encodeQuoteBody({ ...fixtureBody(), srcChain: 0x10000 })
+    ).toThrow();
     expect(() => encodeQuoteBody({ ...fixtureBody(), dstChain: -1 })).toThrow();
-    expect(() => encodeQuoteBody({ ...fixtureBody(), expiryTime: 1n << 64n })).toThrow();
-    expect(() => encodeQuoteBody({ ...fixtureBody(), requiredPayment: 1n << 256n })).toThrow();
-    expect(() => encodeQuoteBody({ ...fixtureBody(), payeeAddress: "0xdead" })).toThrow();
+    expect(() =>
+      encodeQuoteBody({ ...fixtureBody(), expiryTime: 1n << 64n })
+    ).toThrow();
+    expect(() =>
+      encodeQuoteBody({ ...fixtureBody(), requiredPayment: 1n << 256n })
+    ).toThrow();
+    expect(() =>
+      encodeQuoteBody({ ...fixtureBody(), payeeAddress: "0xdead" })
+    ).toThrow();
   });
 });
 
@@ -71,11 +88,13 @@ describe("signQuote", () => {
     const body = fixtureBody();
     const signed = signQuote(body, signingKey);
     const bytes = getBytes(signed.signedQuoteBytes);
-    const bodyHex = "0x" + Buffer.from(bytes.slice(0, SIGNED_QUOTE_BODY_LENGTH)).toString("hex");
+    const bodyHex =
+      "0x" +
+      Buffer.from(bytes.slice(0, SIGNED_QUOTE_BODY_LENGTH)).toString("hex");
     const sigBytes = bytes.slice(SIGNED_QUOTE_BODY_LENGTH);
     const r = "0x" + Buffer.from(sigBytes.slice(0, 32)).toString("hex");
     const s = "0x" + Buffer.from(sigBytes.slice(32, 64)).toString("hex");
-    const v = sigBytes[64];
+    const v = sigBytes[64]!;
 
     const digest = keccak256(bodyHex);
     const recovered = recoverAddress(digest, Signature.from({ r, s, v }));
@@ -87,10 +106,16 @@ describe("signQuote", () => {
     const bytes = getBytes(signed.signedQuoteBytes);
     const s = BigInt(
       "0x" +
-        Buffer.from(bytes.slice(SIGNED_QUOTE_BODY_LENGTH + 32, SIGNED_QUOTE_BODY_LENGTH + 64)).toString("hex"),
+        Buffer.from(
+          bytes.slice(
+            SIGNED_QUOTE_BODY_LENGTH + 32,
+            SIGNED_QUOTE_BODY_LENGTH + 64
+          )
+        ).toString("hex")
     );
     // secp256k1n / 2
-    const HALF_N = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0n;
+    const HALF_N =
+      0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0n;
     expect(s <= HALF_N).toBe(true);
   });
 });
@@ -126,7 +151,7 @@ describe("decodeSignedQuote", () => {
 // Golden vector — deterministic because secp256k1 signing uses RFC 6979 nonces.
 // If this fails, the byte layout, hash construction, or signature encoding changed.
 // On a legitimate change, regenerate by re-running the encoder against the fixture.
-const GOLDEN_PRIVATE_KEY = "0x" + (0xa11cen).toString(16).padStart(64, "0");
+const GOLDEN_PRIVATE_KEY = "0x" + 0xa11cen.toString(16).padStart(64, "0");
 const GOLDEN_BODY = {
   quoterAddress: "0xe05fcC23807536bEe418f142D19fa0d21BB0cfF7",
   payeeAddress: "0x" + "0".repeat(60) + "fee1",

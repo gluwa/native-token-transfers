@@ -1,7 +1,7 @@
 import { Wallet } from "ethers";
 import { loadConfig } from "../src/config.js";
 
-const QUOTER_PRIVATE_KEY = "0x" + (0xa11cen).toString(16).padStart(64, "0");
+const QUOTER_PRIVATE_KEY = "0x" + 0xa11cen.toString(16).padStart(64, "0");
 const QUOTER_ADDRESS = new Wallet(QUOTER_PRIVATE_KEY).address;
 
 function baseEnv(): NodeJS.ProcessEnv {
@@ -27,7 +27,10 @@ describe("loadConfig", () => {
   });
 
   it("accepts a 32-byte payee unchanged", () => {
-    const cfg = loadConfig({ ...baseEnv(), QUOTER_PAYEE_ADDRESS: "0x" + "0".repeat(60) + "fee1" });
+    const cfg = loadConfig({
+      ...baseEnv(),
+      QUOTER_PAYEE_ADDRESS: "0x" + "0".repeat(60) + "fee1",
+    });
     expect(cfg.payeeAddress).toBe("0x" + "0".repeat(60) + "fee1");
   });
 
@@ -38,19 +41,29 @@ describe("loadConfig", () => {
   });
 
   it("rejects out-of-range numeric env vars", () => {
-    expect(() => loadConfig({ ...baseEnv(), QUOTER_SRC_CHAIN: "70000" })).toThrow();
-    expect(() => loadConfig({ ...baseEnv(), QUOTER_VALIDITY_SECONDS: "0" })).toThrow();
+    expect(() =>
+      loadConfig({ ...baseEnv(), QUOTER_SRC_CHAIN: "70000" })
+    ).toThrow();
+    expect(() =>
+      loadConfig({ ...baseEnv(), QUOTER_VALIDITY_SECONDS: "0" })
+    ).toThrow();
     expect(() => loadConfig({ ...baseEnv(), QUOTER_PORT: "999999" })).toThrow();
   });
 
   it("caps QUOTER_VALIDITY_SECONDS at 3600 (1 hour)", () => {
     // Boundary: 3600 accepted.
-    expect(() => loadConfig({ ...baseEnv(), QUOTER_VALIDITY_SECONDS: "3600" })).not.toThrow();
+    expect(() =>
+      loadConfig({ ...baseEnv(), QUOTER_VALIDITY_SECONDS: "3600" })
+    ).not.toThrow();
     // One second over: rejected.
-    expect(() => loadConfig({ ...baseEnv(), QUOTER_VALIDITY_SECONDS: "3601" })).toThrow(/3600/);
+    expect(() =>
+      loadConfig({ ...baseEnv(), QUOTER_VALIDITY_SECONDS: "3601" })
+    ).toThrow(/3600/);
   });
 
   it("rejects an invalid payee shape", () => {
-    expect(() => loadConfig({ ...baseEnv(), QUOTER_PAYEE_ADDRESS: "0xdeadbeef" })).toThrow();
+    expect(() =>
+      loadConfig({ ...baseEnv(), QUOTER_PAYEE_ADDRESS: "0xdeadbeef" })
+    ).toThrow();
   });
 });

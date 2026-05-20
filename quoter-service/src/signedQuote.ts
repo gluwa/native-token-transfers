@@ -1,4 +1,13 @@
-import { SigningKey, keccak256, concat, getAddress, getBytes, hexlify, toBeHex, isHexString } from "ethers";
+import {
+  SigningKey,
+  keccak256,
+  concat,
+  getAddress,
+  getBytes,
+  hexlify,
+  toBeHex,
+  isHexString,
+} from "ethers";
 
 // Address validation in `encodeQuoteBody` uses isHexString rather than getAddress
 // because the caller (config.ts) already validated the address via the Wallet
@@ -54,13 +63,19 @@ export function encodeQuoteBody(body: QuoteBody): Uint8Array {
     throw new RangeError(`expiryTime ${body.expiryTime} out of uint64 range`);
   }
   if (body.requiredPayment < 0n || body.requiredPayment > UINT256_MAX) {
-    throw new RangeError(`requiredPayment ${body.requiredPayment} out of uint256 range`);
+    throw new RangeError(
+      `requiredPayment ${body.requiredPayment} out of uint256 range`
+    );
   }
   if (!isHexString(body.payeeAddress, 32)) {
-    throw new TypeError(`payeeAddress must be a 32-byte hex string, got ${body.payeeAddress}`);
+    throw new TypeError(
+      `payeeAddress must be a 32-byte hex string, got ${body.payeeAddress}`
+    );
   }
   if (!isHexString(body.quoterAddress, 20)) {
-    throw new TypeError(`quoterAddress must be a 20-byte hex string, got ${body.quoterAddress}`);
+    throw new TypeError(
+      `quoterAddress must be a 20-byte hex string, got ${body.quoterAddress}`
+    );
   }
 
   const out = new Uint8Array(SIGNED_QUOTE_BODY_LENGTH);
@@ -80,7 +95,10 @@ export function encodeQuoteBody(body: QuoteBody): Uint8Array {
 /// Sign the 100-byte body with the quoter key and return the concatenated 165-byte
 /// signedQuoteBytes. The signature covers keccak256(body) directly — no EIP-191 prefix,
 /// matching SpecialRelayer._recoverQuoteSigner.
-export function signQuote(body: QuoteBody, signingKey: SigningKey): SignedQuote {
+export function signQuote(
+  body: QuoteBody,
+  signingKey: SigningKey
+): SignedQuote {
   const encoded = encodeQuoteBody(body);
   const digest = keccak256(encoded);
   const sig = signingKey.sign(digest);
@@ -94,7 +112,9 @@ export function signQuote(body: QuoteBody, signingKey: SigningKey): SignedQuote 
 export function decodeSignedQuote(signedQuoteBytes: string): SignedQuote {
   const bytes = getBytes(signedQuoteBytes);
   if (bytes.length !== SIGNED_QUOTE_LENGTH) {
-    throw new RangeError(`signedQuoteBytes length ${bytes.length} != ${SIGNED_QUOTE_LENGTH}`);
+    throw new RangeError(
+      `signedQuoteBytes length ${bytes.length} != ${SIGNED_QUOTE_LENGTH}`
+    );
   }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const quoterAddress = getAddress(hexlify(bytes.slice(4, 24)));
