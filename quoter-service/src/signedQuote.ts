@@ -1,5 +1,9 @@
 import { SigningKey, keccak256, concat, getAddress, getBytes, hexlify, toBeHex, isHexString } from "ethers";
 
+// Address validation in `encodeQuoteBody` uses isHexString rather than getAddress
+// because the caller (config.ts) already validated the address via the Wallet
+// constructor at boot. We only need a cheap length check on the hot path.
+
 /// "PQ01" — must match SpecialRelayer.SIGNED_QUOTE_PREFIX.
 export const SIGNED_QUOTE_PREFIX = "0x50513031";
 export const SIGNED_QUOTE_BODY_LENGTH = 100;
@@ -55,10 +59,13 @@ export function encodeQuoteBody(body: QuoteBody): Uint8Array {
   if (!isHexString(body.payeeAddress, 32)) {
     throw new TypeError(`payeeAddress must be a 32-byte hex string, got ${body.payeeAddress}`);
   }
+  if (!isHexString(body.quoterAddress, 20)) {
+    throw new TypeError(`quoterAddress must be a 20-byte hex string, got ${body.quoterAddress}`);
+  }
 
   const out = new Uint8Array(SIGNED_QUOTE_BODY_LENGTH);
   out.set(getBytes(SIGNED_QUOTE_PREFIX), 0);
-  out.set(getBytes(getAddress(body.quoterAddress)), 4);
+  out.set(getBytes(body.quoterAddress), 4);
   out.set(getBytes(body.payeeAddress), 24);
   const view = new DataView(out.buffer);
   view.setUint16(56, body.srcChain, false);

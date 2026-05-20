@@ -52,9 +52,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): QuoterServiceC
     throw new Error(`QUOTER_SRC_CHAIN must be a uint16, got ${srcChain}`);
   }
   const validitySeconds = Number(env.QUOTER_VALIDITY_SECONDS ?? "120");
-  if (!Number.isInteger(validitySeconds) || validitySeconds <= 0) {
+  // Cap at 1 hour. SpecialRelayer enforces no upper bound on expiry, so a misconfigured
+  // service could mint quotes that remain submittable for arbitrarily long after the
+  // underlying price is stale.
+  if (!Number.isInteger(validitySeconds) || validitySeconds <= 0 || validitySeconds > 3600) {
     throw new Error(
-      `QUOTER_VALIDITY_SECONDS must be a positive integer, got ${validitySeconds}`,
+      `QUOTER_VALIDITY_SECONDS must be an integer in (0, 3600], got ${validitySeconds}`,
     );
   }
   const port = Number(env.QUOTER_PORT ?? "3000");

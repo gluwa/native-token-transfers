@@ -95,7 +95,6 @@ describe("POST /quote", () => {
       expect(quoter.lastRequest).toEqual({
         dstChain: 5,
         dstAddr: "0x" + "ab".repeat(20),
-        refundAddr: undefined,
         msgValue: 1_000_000_000_000_000_000n,
         gasLimit: 300_000n,
       });

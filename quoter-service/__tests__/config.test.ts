@@ -43,6 +43,13 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ ...baseEnv(), QUOTER_PORT: "999999" })).toThrow();
   });
 
+  it("caps QUOTER_VALIDITY_SECONDS at 3600 (1 hour)", () => {
+    // Boundary: 3600 accepted.
+    expect(() => loadConfig({ ...baseEnv(), QUOTER_VALIDITY_SECONDS: "3600" })).not.toThrow();
+    // One second over: rejected.
+    expect(() => loadConfig({ ...baseEnv(), QUOTER_VALIDITY_SECONDS: "3601" })).toThrow(/3600/);
+  });
+
   it("rejects an invalid payee shape", () => {
     expect(() => loadConfig({ ...baseEnv(), QUOTER_PAYEE_ADDRESS: "0xdeadbeef" })).toThrow();
   });

@@ -23,10 +23,16 @@ export function isTransientRpcError(err: unknown): boolean {
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/// Returns a value in [0.75, 1.25] — ±25% multiplicative jitter on the backoff window.
+/// Spreads concurrent retries so a transient RPC outage doesn't cause every in-flight
+/// quote to retry in lockstep when the node recovers.
+const defaultJitter = (): number => 0.75 + Math.random() * 0.5;
+
 export async function withRetry<T>(
   fn: () => Promise<T>,
   opts: RetryOptions = DEFAULT_RETRY,
   sleep: (ms: number) => Promise<void> = defaultSleep,
+  jitter: () => number = defaultJitter,
 ): Promise<T> {
   let lastErr: unknown;
   for (let attempt = 1; attempt <= opts.maxAttempts; attempt++) {
@@ -36,8 +42,8 @@ export async function withRetry<T>(
       lastErr = err;
       const isLast = attempt === opts.maxAttempts;
       if (isLast || !isTransientRpcError(err)) throw err;
-      const delay = Math.min(opts.initialDelayMs * 2 ** (attempt - 1), opts.maxDelayMs);
-      await sleep(delay);
+      const base = Math.min(opts.initialDelayMs * 2 ** (attempt - 1), opts.maxDelayMs);
+      await sleep(Math.round(base * jitter()));
     }
   }
   // Unreachable — the loop either returns or throws on the last attempt.

@@ -8,7 +8,6 @@ import { signQuote } from "./signedQuote.js";
 interface QuoteRequestBody {
   dstChain: unknown;
   dstAddr: unknown;
-  refundAddr?: unknown;
   msgValue?: unknown;
   gasLimit?: unknown;
 }
@@ -67,13 +66,9 @@ class BadRequest extends Error {}
 function parseQuoteRequest(body: QuoteRequestBody): ParsedBody {
   const dstChain = parseUint16("dstChain", body.dstChain);
   const dstAddr = parseHexAddress("dstAddr", body.dstAddr);
-  const refundAddr =
-    body.refundAddr === undefined || body.refundAddr === null
-      ? undefined
-      : parseHexAddress("refundAddr", body.refundAddr);
   const msgValue = parseBigInt("msgValue", body.msgValue);
   const gasLimit = parseBigInt("gasLimit", body.gasLimit);
-  return { parsed: { dstChain, dstAddr, refundAddr, msgValue, gasLimit } };
+  return { parsed: { dstChain, dstAddr, msgValue, gasLimit } };
 }
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {

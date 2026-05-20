@@ -26,14 +26,14 @@ All config is via environment variables:
 | `QUOTER_CONTRACT_ADDRESS`     | yes      |             | `PenguinBridgeExecutionQuoter` address.                                |
 | `QUOTER_SRC_CHAIN`            | yes      |             | Wormhole chain id of the source chain (uint16).                        |
 | `QUOTER_PAYEE_ADDRESS`        | yes      |             | 20- or 32-byte hex address that receives the fee (encoded as bytes32). |
-| `QUOTER_VALIDITY_SECONDS`     | no       | `120`       | Quote validity window. Should be short enough that prices don't drift. |
+| `QUOTER_VALIDITY_SECONDS`     | no       | `120`       | Quote validity window in seconds. Capped at 3600 (1 hour).             |
 | `QUOTER_HOST`                 | no       | `127.0.0.1` | HTTP bind host.                                                        |
 | `QUOTER_PORT`                 | no       | `3000`      | HTTP bind port.                                                        |
 | `QUOTER_RPC_MAX_ATTEMPTS`     | no       | `3`         | Total RPC attempts including the first try (1 disables retry).         |
 | `QUOTER_RPC_INITIAL_DELAY_MS` | no       | `200`       | First backoff delay; doubles each attempt up to `MAX_DELAY_MS`.        |
 | `QUOTER_RPC_MAX_DELAY_MS`     | no       | `2000`      | Backoff ceiling.                                                       |
 
-RPC retry only kicks in for transport-layer failures (`NETWORK_ERROR`, `SERVER_ERROR`, `TIMEOUT`). Contract reverts (`CALL_EXCEPTION`) are not retried.
+RPC retry only kicks in for transport-layer failures (`NETWORK_ERROR`, `SERVER_ERROR`, `TIMEOUT`). Contract reverts (`CALL_EXCEPTION`) are not retried. Backoff is exponential with ±25% jitter so concurrent failures don't retry in lockstep against a recovering node.
 
 ## HTTP API
 
@@ -45,7 +45,6 @@ Request:
 {
   "dstChain": 5,
   "dstAddr": "0x000...",
-  "refundAddr": "0x...",
   "msgValue": "1000000000000000000",
   "gasLimit": "300000"
 }
@@ -53,7 +52,6 @@ Request:
 
 - `dstChain` — Wormhole chain id of the destination (uint16).
 - `dstAddr` — Destination NTT Manager address, 20 or 32 bytes hex. 20-byte input is left-padded to bytes32.
-- `refundAddr` — Optional 20-byte EVM address. Accepted for WormholeSDK ABI parity but not used in fee computation.
 - `msgValue` — Value to forward on the destination chain, in destination native wei. Number or numeric string.
 - `gasLimit` — Destination-side gas limit. Number or numeric string.
 

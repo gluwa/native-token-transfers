@@ -8,6 +8,11 @@ import {
   zeroPadValue,
 } from "ethers";
 
+// refundAddr is accepted by the on-chain requestQuote for WormholeSDK ABI parity but
+// isn't used in fee computation. We hardcode the zero address rather than threading it
+// through the public API.
+const UNUSED_REFUND_ADDR = ZeroAddress;
+
 import { DEFAULT_RETRY, type RetryOptions, withRetry } from "./retry.js";
 
 /// Minimal ABI for the on-chain price source. The full interface lives in
@@ -23,8 +28,6 @@ export interface QuoteRequest {
   /// bytes32 universal address of the destination NTT Manager. Accepts a 20-byte EVM
   /// address as a convenience; it is left-padded to 32 bytes.
   dstAddr: string;
-  /// Optional EVM address; accepted for WormholeSDK ABI compatibility but unused on-chain.
-  refundAddr?: string;
   /// Value to forward on the destination chain, in destination native wei.
   msgValue: bigint;
   /// Gas limit for the destination-side execution.
@@ -97,7 +100,6 @@ export class RpcOnChainQuoter implements OnChainQuoter {
 
   async fetchRequiredPayment(req: QuoteRequest): Promise<bigint> {
     const dstAddr = normalizeDstAddr(req.dstAddr);
-    const refundAddr = req.refundAddr ? getAddress(req.refundAddr) : ZeroAddress;
     const requestBytes = encodeUint256(req.msgValue);
     const relayInstructions = encodeUint256(req.gasLimit);
     return withRetry(
@@ -105,7 +107,7 @@ export class RpcOnChainQuoter implements OnChainQuoter {
         this.contract.requestQuote(
           req.dstChain,
           dstAddr,
-          refundAddr,
+          UNUSED_REFUND_ADDR,
           requestBytes,
           relayInstructions,
         ) as Promise<bigint>,

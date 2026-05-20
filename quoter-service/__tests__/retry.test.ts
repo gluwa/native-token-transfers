@@ -77,15 +77,36 @@ describe("withRetry", () => {
     let calls = 0;
     const err = Object.assign(new Error("flap"), { code: "TIMEOUT" });
     const retryOpts = { maxAttempts: 5, initialDelayMs: 50, maxDelayMs: 120 };
+    // Pin jitter to 1.0 so the test can assert exact backoff math without flakiness.
+    const noJitter = (): number => 1.0;
     await expect(
       withRetry(async () => {
         calls += 1;
         throw err;
-      }, retryOpts, sleep),
+      }, retryOpts, sleep, noJitter),
     ).rejects.toBe(err);
     expect(calls).toBe(5);
     // No sleep after the final attempt — only 4 backoff windows.
     expect(delays).toEqual([50, 100, 120, 120]);
+  });
+
+  it("applies ±25% jitter to the backoff window", async () => {
+    const delays: number[] = [];
+    const sleep = (ms: number): Promise<void> => {
+      delays.push(ms);
+      return Promise.resolve();
+    };
+    const err = Object.assign(new Error("flap"), { code: "NETWORK_ERROR" });
+    const retryOpts = { maxAttempts: 4, initialDelayMs: 100, maxDelayMs: 100 };
+    // Force jitter to its bounds: first call returns min, second returns max.
+    const jitters = [0.75, 1.25, 0.75];
+    let idx = 0;
+    await expect(
+      withRetry(async () => {
+        throw err;
+      }, retryOpts, sleep, () => jitters[idx++]!),
+    ).rejects.toBe(err);
+    expect(delays).toEqual([75, 125, 75]);
   });
 
   it("disables retry when maxAttempts is 1", async () => {
