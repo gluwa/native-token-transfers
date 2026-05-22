@@ -128,8 +128,8 @@ function install_cli {
 
   # swallow the output of the first install
   # TODO: figure out why it fails the first time.
-  bun install > /dev/null 2>&1 || true
-  bun install
+  bun install --frozen-lockfile > /dev/null 2>&1 || true
+  bun install --frozen-lockfile
 
   # make a temporary directory
 

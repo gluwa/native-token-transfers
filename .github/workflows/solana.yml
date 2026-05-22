@@ -114,7 +114,7 @@ jobs:
         uses: actions/cache@v3
         with:
           path: ./solana/node_modules/
-          key: node-modules-${{ runner.os }}-build-${{ env.node-version }}
+          key: node-modules-${{ runner.os }}-build-${{ env.node-version }}-${{ hashFiles('package-lock.json') }}
 
       - name: Install node_modules
         run: make node_modules
