@@ -7,9 +7,23 @@ Off-chain HTTP service that produces signed execution quotes for `SpecialRelayer
 In order to use `SpecialRelayer`, the relayer requires a `signedQuoteBytes` blob that proves the quoted fee came from an authorized quoter. This service:
 
 1. Reads the current required payment from `PenguinBridgeExecutionQuoter.requestQuote` on-chain.
-2. Packs the fee plus quoter address, payee, source/destination chain ids, and an expiry into the 100-byte body layout that `SpecialRelayer._parseSignedQuote` expects.
+2. Packs the fee plus quoter address, payee, source/destination chain ids, expiry, and the destination gas limit into the 132-byte body layout that `SpecialRelayer._parseSignedQuote` expects.
 3. Signs `keccak256(body)` with the configured quoter key (registered in `PenguinBridgeExecutionQuoter.authorizedQuoters`).
-4. Returns the 165-byte `signedQuoteBytes` payload, which the user passes directly to `SpecialRelayer.requestDelivery`.
+4. Returns the 197-byte `signedQuoteBytes` payload, which the user passes directly to `SpecialRelayer.requestExecution`.
+
+The signed body binds `gasLimit` so the caller can verify the gas amount used to derive `requiredPayment`. `requestExecution` takes `relayInstructions = abi.encode(uint256 gasLimit)` alongside the signed quote and on-chain rejects any mismatch, so the relayer can't quietly downgrade gas after collecting the fee. The `ExecutionRequested` event re-emits `relayInstructions` so the off-chain relayer bot can decode the gasLimit from the log without parsing calldata. Layout:
+
+```
+bytes4   prefix            offset 0    "PQ01"
+address  quoterAddress     offset 4    20 bytes
+bytes32  payeeAddress      offset 24   32 bytes
+uint16   srcChain          offset 56
+uint16   dstChain          offset 58
+uint64   expiryTime        offset 60
+uint256  gasLimit          offset 68   32 bytes
+uint256  requiredPayment   offset 100  32 bytes
+bytes65  signature         offset 132  (r || s || v)
+```
 
 At startup the service calls `isAuthorizedQuoter` on the configured contract and verifies that the signing key is registered before running.
 

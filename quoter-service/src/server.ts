@@ -160,6 +160,7 @@ export function createQuoterServer(options: CreateServerOptions): Server {
         srcChain: config.srcChain,
         dstChain: parsed.dstChain,
         expiryTime,
+        gasLimit: parsed.gasLimit,
         requiredPayment,
       },
       config.signingKey
@@ -169,6 +170,7 @@ export function createQuoterServer(options: CreateServerOptions): Server {
       signedQuoteBytes: signed.signedQuoteBytes,
       requiredPayment: requiredPayment.toString(),
       expiryTime: expiryTime.toString(),
+      gasLimit: parsed.gasLimit.toString(),
       srcChain: config.srcChain,
       dstChain: parsed.dstChain,
       quoterAddress: config.quoterAddress,

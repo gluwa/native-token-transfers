@@ -27,6 +27,7 @@ function fixtureBody() {
     srcChain: 2,
     dstChain: 5,
     expiryTime: 1_700_000_000n,
+    gasLimit: 200_000n,
     requiredPayment: 250_000_000_000_000_000n, // 0.25 ether
   };
 }
@@ -53,8 +54,10 @@ describe("encodeQuoteBody", () => {
     expect(parseInt(hex.slice(118, 122), 16)).toBe(body.dstChain);
     // uint64 expiryTime at offset 60
     expect(BigInt("0x" + hex.slice(122, 138))).toBe(body.expiryTime);
-    // uint256 requiredPayment at offset 68
-    expect(BigInt("0x" + hex.slice(138, 202))).toBe(body.requiredPayment);
+    // uint256 gasLimit at offset 68
+    expect(BigInt("0x" + hex.slice(138, 202))).toBe(body.gasLimit);
+    // uint256 requiredPayment at offset 100
+    expect(BigInt("0x" + hex.slice(202, 266))).toBe(body.requiredPayment);
   });
 
   it("rejects out-of-range fields", () => {
@@ -64,6 +67,9 @@ describe("encodeQuoteBody", () => {
     expect(() => encodeQuoteBody({ ...fixtureBody(), dstChain: -1 })).toThrow();
     expect(() =>
       encodeQuoteBody({ ...fixtureBody(), expiryTime: 1n << 64n })
+    ).toThrow();
+    expect(() =>
+      encodeQuoteBody({ ...fixtureBody(), gasLimit: 1n << 256n })
     ).toThrow();
     expect(() =>
       encodeQuoteBody({ ...fixtureBody(), requiredPayment: 1n << 256n })
@@ -78,7 +84,7 @@ describe("signQuote", () => {
   const signingKey = new SigningKey(QUOTER_PRIVATE_KEY);
   const expectedSigner = new Wallet(QUOTER_PRIVATE_KEY).address;
 
-  it("produces a 165-byte payload (body || r || s || v)", () => {
+  it("produces a 197-byte payload (body || r || s || v)", () => {
     const signed = signQuote(fixtureBody(), signingKey);
     const bytes = getBytes(signed.signedQuoteBytes);
     expect(bytes.length).toBe(SIGNED_QUOTE_LENGTH);
@@ -132,15 +138,16 @@ describe("decodeSignedQuote", () => {
     expect(decoded.srcChain).toBe(original.srcChain);
     expect(decoded.dstChain).toBe(original.dstChain);
     expect(decoded.expiryTime).toBe(original.expiryTime);
+    expect(decoded.gasLimit).toBe(original.gasLimit);
     expect(decoded.requiredPayment).toBe(original.requiredPayment);
   });
 
-  it("rejects payloads that are not exactly 165 bytes", () => {
+  it("rejects payloads that are not exactly 197 bytes", () => {
     expect(() => decodeSignedQuote("0x1234")).toThrow();
-    // 100-byte body without signature
-    expect(() => decodeSignedQuote("0x" + "ab".repeat(100))).toThrow();
-    // 166 bytes (one too many)
-    expect(() => decodeSignedQuote("0x" + "ab".repeat(166))).toThrow();
+    // 132-byte body without signature
+    expect(() => decodeSignedQuote("0x" + "ab".repeat(132))).toThrow();
+    // 198 bytes (one too many)
+    expect(() => decodeSignedQuote("0x" + "ab".repeat(198))).toThrow();
   });
 
   it("rejects non-hex input", () => {
@@ -158,6 +165,7 @@ const GOLDEN_BODY = {
   srcChain: 2,
   dstChain: 5,
   expiryTime: 1_700_000_000n,
+  gasLimit: 200_000n,
   requiredPayment: 250_000_000_000_000_000n,
 };
 const GOLDEN_BODY_HEX =
@@ -167,12 +175,13 @@ const GOLDEN_BODY_HEX =
   "0002" +
   "0005" +
   "000000006553f100" +
+  "0000000000000000000000000000000000000000000000000000000000030d40" +
   "00000000000000000000000000000000000000000000000003782dace9d90000";
 const GOLDEN_SIGNED_HEX =
   GOLDEN_BODY_HEX +
-  "04774197c677638d95b7a6d69ac9950ebd4553e8304580f287251ce393c3b5bf" +
-  "15f74b276bd9871ad024db0a4fa49bf377835f6018f94e6154729970c53a4df9" +
-  "1b";
+  "262059b3175dcc4ddb0e4344d240d4ed73dc1e2dcdd5a5b12c6977f840e70915" +
+  "284757c27d4357f55844f2788c426891b619d604735fcac44c194440ff33394c" +
+  "1c";
 
 describe("golden vector", () => {
   it("encodes the fixture body to the exact reference bytes", () => {
@@ -192,6 +201,7 @@ describe("golden vector", () => {
     expect(decoded.srcChain).toBe(GOLDEN_BODY.srcChain);
     expect(decoded.dstChain).toBe(GOLDEN_BODY.dstChain);
     expect(decoded.expiryTime).toBe(GOLDEN_BODY.expiryTime);
+    expect(decoded.gasLimit).toBe(GOLDEN_BODY.gasLimit);
     expect(decoded.requiredPayment).toBe(GOLDEN_BODY.requiredPayment);
   });
 });

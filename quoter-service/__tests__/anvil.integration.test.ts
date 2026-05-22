@@ -4,6 +4,7 @@ import { resolve as resolvePath } from "node:path";
 import type { AddressInfo } from "node:net";
 
 import {
+  AbiCoder,
   Contract,
   ContractFactory,
   type InterfaceAbi,
@@ -18,6 +19,7 @@ import {
 import type { QuoterServiceConfig } from "../src/config.js";
 import { RpcOnChainQuoter } from "../src/quoter.js";
 import { createQuoterServer } from "../src/server.js";
+import { SIGNED_QUOTE_LENGTH } from "../src/signedQuote.js";
 
 // Gate: only run if foundry artifacts + anvil are available locally. This keeps the
 // test useful in dev environments without forcing CI to install foundry.
@@ -40,7 +42,7 @@ const maybe = runIntegration ? describe : describe.skip;
 // Anvil's first default account private key (deterministic).
 const DEPLOYER_KEY =
   "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-// Second default account — used to submit the requestDelivery transaction (so the
+// Second default account — used to submit the requestExecution transaction (so the
 // deployer/owner balance change doesn't muddle the payee balance check).
 const USER_KEY =
   "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
@@ -194,7 +196,7 @@ maybe("end-to-end against anvil", () => {
     if (provider) provider.destroy();
   });
 
-  it("issues a signedQuoteBytes that SpecialRelayer.requestDelivery accepts", async () => {
+  it("issues a signedQuoteBytes that SpecialRelayer.requestExecution accepts", async () => {
     const wallet = new Wallet(QUOTER_PRIVATE_KEY);
     const cfg: QuoterServiceConfig = {
       signingKey: wallet.signingKey,
@@ -246,7 +248,7 @@ maybe("end-to-end against anvil", () => {
           requiredPayment: string;
         };
         const signed = body.signedQuoteBytes;
-        expect(getBytes(signed).length).toBe(165);
+        expect(getBytes(signed).length).toBe(SIGNED_QUOTE_LENGTH);
 
         // On-chain quote for the same inputs — should match what the service signed
         // (it reads from the same contract).
@@ -265,21 +267,46 @@ maybe("end-to-end against anvil", () => {
         const user = new Wallet(USER_KEY, provider);
         const relayerAsUser = relayerContract.connect(user);
         const payeeBalanceBefore = await rawBalance(PAYEE_EOA);
+        const dstAddr = zeroPadValue("0x" + "ab".repeat(20), 32);
+        const requestBytes = "0xdeadbeef";
+        const relayInstructions = AbiCoder.defaultAbiCoder().encode(
+          ["uint256"],
+          [200_000n]
+        );
         const tx = await relayerAsUser[
-          "requestDelivery(address,uint16,uint256,uint64,bytes)"
+          "requestExecution(uint16,bytes32,address,bytes,bytes,bytes)"
         ](
-          deployerAddress, // sourceContract — arbitrary
           DST_CHAIN,
-          0n,
-          7n, // sequence
+          dstAddr,
+          "0x0000000000000000000000000000000000000000",
           signed,
+          requestBytes,
+          relayInstructions,
           { value: BigInt(body.requiredPayment) }
         );
-        await tx.wait();
+        const receipt = await tx.wait();
         const payeeBalanceAfter = await rawBalance(PAYEE_EOA);
         expect(payeeBalanceAfter - payeeBalanceBefore).toBe(
           BigInt(body.requiredPayment)
         );
+
+        // The relayer bot needs gasLimit to execute on the destination chain.
+        // It reads relayInstructions from the ExecutionRequested event and decodes
+        // the uint256 gasLimit out of it.
+        const event = relayerContract.interface.parseLog(
+          (receipt as { logs: Array<{ topics: string[]; data: string }> })
+            .logs[0]!
+        );
+        expect(event?.name).toBe("ExecutionRequested");
+        expect(event?.args["dstChain"]).toBe(BigInt(DST_CHAIN));
+        expect(event?.args["dstAddr"]).toBe(dstAddr);
+        expect(event?.args["requestBytes"]).toBe(requestBytes);
+        expect(event?.args["relayInstructions"]).toBe(relayInstructions);
+        const decodedGasLimit = AbiCoder.defaultAbiCoder().decode(
+          ["uint256"],
+          event?.args["relayInstructions"] as string
+        )[0] as bigint;
+        expect(decodedGasLimit).toBe(200_000n);
       } finally {
         await new Promise<void>((resolve) => server.close(() => resolve()));
       }

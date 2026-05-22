@@ -231,11 +231,16 @@ contract WormholeTransceiver is
             emit RelayingInfo(uint8(RelayingType.Standard), refundAddress, deliveryPayment);
         } else if (!weIns.shouldSkipRelayerSend && isSpecialRelayingEnabled(recipientChain)) {
             uint256 wormholeFee = wormhole.messageFee();
-            uint64 sequence = wormhole.publishMessage{value: wormholeFee}(
+            wormhole.publishMessage{value: wormholeFee}(
                 0, encodedTransceiverPayload, consistencyLevel
             );
-            specialRelayer.requestDelivery{value: deliveryPayment - wormholeFee}(
-                getNttManagerToken(), recipientChain, 0, sequence, weIns.signedQuoteBytes
+            specialRelayer.requestExecution{value: deliveryPayment - wormholeFee}(
+                recipientChain,
+                getWormholePeer(recipientChain),
+                address(0),
+                weIns.signedQuoteBytes,
+                encodedTransceiverPayload,
+                abi.encode(gasLimit)
             );
 
             // NOTE: specialized relaying does not currently support refunds. The zero address

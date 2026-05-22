@@ -83,6 +83,7 @@ describe("POST /quote", () => {
           signedQuoteBytes: string;
           requiredPayment: string;
           expiryTime: string;
+          gasLimit: string;
           srcChain: number;
           dstChain: number;
         };
@@ -91,6 +92,7 @@ describe("POST /quote", () => {
         );
         expect(body.requiredPayment).toBe("123456789");
         expect(body.expiryTime).toBe(String(fixedNow + config.validitySeconds));
+        expect(body.gasLimit).toBe("300000");
         expect(body.srcChain).toBe(config.srcChain);
         expect(body.dstChain).toBe(5);
 
@@ -102,6 +104,7 @@ describe("POST /quote", () => {
         expect(decoded.expiryTime).toBe(
           BigInt(fixedNow + config.validitySeconds)
         );
+        expect(decoded.gasLimit).toBe(300_000n);
         expect(decoded.requiredPayment).toBe(123_456_789n);
 
         expect(quoter.lastRequest).toEqual({

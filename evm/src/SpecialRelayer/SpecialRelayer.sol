@@ -9,9 +9,9 @@ import "../interfaces/IPenguinBridgeExecutionQuoter.sol";
 import "../interfaces/ISpecialRelayer.sol";
 
 /// @title SpecialRelayer
-/// @notice NTT special relayer that quotes dynamic quoter fees and accepts delivery requests.
-///         A backend service listens for DeliveryRequested events and relays VAAs to the
-///         destination chain by calling the transceiver's receiveMessage(bytes).
+/// @notice NTT special relayer that quotes dynamic quoter fees and accepts execution requests.
+///         A backend service listens for ExecutionRequested events and relays the request to
+///         the destination chain.
 ///
 /// @dev Deploy one per source chain. Set this contract's address as the WormholeTransceiver's
 ///      specialRelayer at deploy time, then enable special relaying per destination chain via
@@ -20,7 +20,7 @@ contract SpecialRelayer is ISpecialRelayer, Ownable2Step, ReentrancyGuard {
     using ECDSA for bytes32;
 
     bytes4 public constant SIGNED_QUOTE_PREFIX = 0x50513031; // "PQ01"
-    uint256 public constant SIGNED_QUOTE_BODY_LENGTH = 100;
+    uint256 public constant SIGNED_QUOTE_BODY_LENGTH = 132;
     uint256 public constant SIGNED_QUOTE_LENGTH = SIGNED_QUOTE_BODY_LENGTH + 65;
 
     /// @notice Canonical execution pricing source and quote signer registry.
@@ -29,19 +29,16 @@ contract SpecialRelayer is ISpecialRelayer, Ownable2Step, ReentrancyGuard {
     /// @notice Wormhole chain id of the chain this relayer is deployed on.
     ///         Signed quotes must encode a matching srcChain or they are rejected,
     ///         preventing cross-chain replay of quotes signed for a different source.
-    ///         Must be set before signed-quote delivery is accepted.
+    ///         Must be set before signed-quote execution requests are accepted.
     uint16 public sourceChainId;
 
-    /// @notice Emitted when a delivery is requested. The relayer backend should watch this,
-    ///         fetch the VAA for the given sequence from the Wormhole core (emitter = source
-    ///         chain's WormholeTransceiver), then call transceiver.receiveMessage(vaa) on the
-    ///         target chain.
-    /// @param sourceContract NTT manager token address (as passed by the transceiver).
-    /// @param targetChain Wormhole chain id of the destination.
-    /// @param sequence Wormhole message sequence; use with source chain id to fetch the VAA.
-    /// @param payment Value received for this delivery (relayer fee).
-    event DeliveryRequested(
-        address indexed sourceContract, uint16 indexed targetChain, uint64 indexed sequence, uint256 payment
+    /// @notice Emitted when an execution is requested. The relayer backend should watch this
+    ///         and submit the request to the destination chain using `relayInstructions` for
+    ///         the gas budget. `relayInstructions` is `abi.encode(uint256 gasLimit)` and the
+    ///         contract verifies it matches the gasLimit committed in the signed quote, so
+    ///         the relayer cannot under-deliver gas after the fee is collected.
+    event ExecutionRequested(
+        uint16 indexed dstChain, bytes32 indexed dstAddr, bytes requestBytes, bytes relayInstructions
     );
 
     /// @notice Emitted when the execution quoter is updated.
@@ -58,6 +55,7 @@ contract SpecialRelayer is ISpecialRelayer, Ownable2Step, ReentrancyGuard {
         uint16 signedSourceChain;
         uint16 signedTargetChain;
         uint64 expiryTime;
+        uint256 gasLimit;
         uint256 requiredPayment;
     }
 
@@ -71,7 +69,7 @@ contract SpecialRelayer is ISpecialRelayer, Ownable2Step, ReentrancyGuard {
     error InvalidQuoteSigner(address signer);
     error InvalidPayeeAddress(bytes32 payeeAddress);
     error QuotePaymentFailed(address payee, uint256 payment);
-    error SignedQuoteRequired();
+    error RelayInstructionsGasLimitMismatch(uint256 expected, uint256 actual);
     error SourceChainIdNotSet();
     error ExecutionQuoterNotSet();
     error WithdrawFailed();
@@ -120,45 +118,21 @@ contract SpecialRelayer is ISpecialRelayer, Ownable2Step, ReentrancyGuard {
     }
 
     /// @inheritdoc ISpecialRelayer
-    function requestDelivery(
-        address,
-        /* sourceContract */
-        uint16,
-        /* targetChain */
-        uint256,
-        /* additionalValue */
-        uint64 /* sequence */
-    )
-        external
-        payable
-        nonReentrant
-    {
-        // Fixed-fee mode has been removed; all delivery requests must include a signed quote.
-        revert SignedQuoteRequired();
-    }
-
-    /// @inheritdoc ISpecialRelayer
-    function requestDelivery(
-        address sourceContract,
-        uint16 targetChain,
-        uint256,
-        /* additionalValue */
-        uint64 sequence,
-        bytes calldata signedQuoteBytes
+    function requestExecution(
+        uint16 dstChain,
+        bytes32 dstAddr,
+        address, /* refundAddr — accepted for WormholeSDK ABI parity, unused */
+        bytes calldata signedQuoteBytes,
+        bytes calldata requestBytes,
+        bytes calldata relayInstructions
     ) external payable nonReentrant {
-        _requestDelivery(sourceContract, targetChain, sequence, signedQuoteBytes);
+        _validateAndPay(dstChain, signedQuoteBytes, relayInstructions);
+        emit ExecutionRequested(dstChain, dstAddr, requestBytes, relayInstructions);
     }
 
-    function _requestDelivery(
-        address sourceContract,
-        uint16 targetChain,
-        uint64 sequence,
-        bytes memory signedQuoteBytes
-    ) internal {
-        if (signedQuoteBytes.length == 0) {
-            revert SignedQuoteRequired();
-        }
-
+    function _validateAndPay(uint16 dstChain, bytes calldata signedQuoteBytes, bytes calldata relayInstructions)
+        internal
+    {
         IPenguinBridgeExecutionQuoter executionQuoter = penguinBridgeExecutionQuoter;
         if (address(executionQuoter) == address(0)) {
             revert ExecutionQuoterNotSet();
@@ -177,14 +151,22 @@ contract SpecialRelayer is ISpecialRelayer, Ownable2Step, ReentrancyGuard {
         if (q.signedSourceChain != expectedSrcChain) {
             revert InvalidQuoteSourceChain(expectedSrcChain, q.signedSourceChain);
         }
-        if (q.signedTargetChain != targetChain) {
-            revert InvalidQuoteTargetChain(targetChain, q.signedTargetChain);
+        if (q.signedTargetChain != dstChain) {
+            revert InvalidQuoteTargetChain(dstChain, q.signedTargetChain);
         }
         if (block.timestamp > q.expiryTime) {
             revert QuoteExpired(q.expiryTime);
         }
         if (msg.value < q.requiredPayment) {
             revert InsufficientPayment(q.requiredPayment, msg.value);
+        }
+
+        // relayInstructions encodes abi.encode(uint256 gasLimit); verify it matches the
+        // gasLimit the quoter signed so the relayer cannot under-deliver gas after the fee
+        // is collected.
+        uint256 instructedGasLimit = abi.decode(relayInstructions, (uint256));
+        if (instructedGasLimit != q.gasLimit) {
+            revert RelayInstructionsGasLimitMismatch(q.gasLimit, instructedGasLimit);
         }
 
         address signer = _recoverQuoteSigner(signedQuoteBytes);
@@ -201,8 +183,8 @@ contract SpecialRelayer is ISpecialRelayer, Ownable2Step, ReentrancyGuard {
             payee = owner();
         }
 
-        // Forward exactly the quoted amount to the payee; refund any excess to the caller
-        // so users aren't penalized for overpaying.
+        // Forward exactly the quoted amount to the payee; refund any excess to the
+        // caller so users aren't penalized for overpaying.
         (bool paid,) = payable(payee).call{value: q.requiredPayment}("");
         if (!paid) {
             revert QuotePaymentFailed(payee, q.requiredPayment);
@@ -215,8 +197,6 @@ contract SpecialRelayer is ISpecialRelayer, Ownable2Step, ReentrancyGuard {
                 revert RefundFailed(msg.sender, refund);
             }
         }
-
-        emit DeliveryRequested(sourceContract, targetChain, sequence, q.requiredPayment);
     }
 
     function _parseSignedQuote(bytes memory signedQuoteBytes) internal pure returns (ParsedQuote memory q) {
@@ -230,6 +210,7 @@ contract SpecialRelayer is ISpecialRelayer, Ownable2Step, ReentrancyGuard {
         uint16 signedSourceChain;
         uint16 signedTargetChain;
         uint64 expiryTime;
+        uint256 gasLimit;
         uint256 requiredPayment;
         assembly {
             let data := add(signedQuoteBytes, 32)
@@ -239,7 +220,8 @@ contract SpecialRelayer is ISpecialRelayer, Ownable2Step, ReentrancyGuard {
             signedSourceChain := shr(240, mload(add(data, 56)))
             signedTargetChain := shr(240, mload(add(data, 58)))
             expiryTime := shr(192, mload(add(data, 60)))
-            requiredPayment := mload(add(data, 68))
+            gasLimit := mload(add(data, 68))
+            requiredPayment := mload(add(data, 100))
         }
         q.prefix = prefix;
         q.quotedQuoter = address(quotedQuoterRaw);
@@ -247,6 +229,7 @@ contract SpecialRelayer is ISpecialRelayer, Ownable2Step, ReentrancyGuard {
         q.signedSourceChain = signedSourceChain;
         q.signedTargetChain = signedTargetChain;
         q.expiryTime = expiryTime;
+        q.gasLimit = gasLimit;
         q.requiredPayment = requiredPayment;
     }
 
@@ -265,14 +248,14 @@ contract SpecialRelayer is ISpecialRelayer, Ownable2Step, ReentrancyGuard {
         return hash.recover(v, r, s);
     }
 
-    /// @notice Set the canonical execution quoter that signs and prices deliveries.
+    /// @notice Set the canonical execution quoter that signs and prices executions.
     function setExecutionQuoter(address executionQuoter) external onlyOwner {
         penguinBridgeExecutionQuoter = IPenguinBridgeExecutionQuoter(executionQuoter);
         emit ExecutionQuoterSet(executionQuoter);
     }
 
     /// @notice Set the Wormhole chain id of the chain this relayer is deployed on.
-    ///         Required before signed-quote delivery requests will be accepted, since
+    ///         Required before signed-quote execution requests will be accepted, since
     ///         the signed quote's srcChain must match this value.
     function setSourceChainId(uint16 chainId) external onlyOwner {
         sourceChainId = chainId;

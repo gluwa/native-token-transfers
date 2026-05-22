@@ -15,7 +15,7 @@ import {
 
 /// "PQ01" — must match SpecialRelayer.SIGNED_QUOTE_PREFIX.
 export const SIGNED_QUOTE_PREFIX = "0x50513031";
-export const SIGNED_QUOTE_BODY_LENGTH = 100;
+export const SIGNED_QUOTE_BODY_LENGTH = 132;
 export const SIGNATURE_LENGTH = 65;
 export const SIGNED_QUOTE_LENGTH = SIGNED_QUOTE_BODY_LENGTH + SIGNATURE_LENGTH;
 
@@ -31,6 +31,11 @@ export interface QuoteBody {
   dstChain: number;
   /// Unix seconds after which SpecialRelayer rejects the quote.
   expiryTime: bigint;
+  /// Destination-side gas limit the caller requested. Bound into the signature so
+  /// the caller can verify the gasLimit used to derive requiredPayment, and so the
+  /// off-chain relayer bot has a signed source of truth for the gas to use on
+  /// destination.
+  gasLimit: bigint;
   /// Required source-chain payment in wei.
   requiredPayment: bigint;
 }
@@ -43,15 +48,16 @@ const UINT16_MAX = 0xffff;
 const UINT64_MAX = (1n << 64n) - 1n;
 const UINT256_MAX = (1n << 256n) - 1n;
 
-/// Pack the quote body into the exact 100-byte layout SpecialRelayer expects.
+/// Pack the quote body into the exact 132-byte layout SpecialRelayer expects.
 /// The layout (matching SpecialRelayer._parseSignedQuote) is:
 ///   bytes4   prefix
-///   address  quoterAddress     (offset 4,  20 bytes)
-///   bytes32  payeeAddress      (offset 24, 32 bytes)
-///   uint16   srcChain          (offset 56,  2 bytes)
-///   uint16   dstChain          (offset 58,  2 bytes)
-///   uint64   expiryTime        (offset 60,  8 bytes)
-///   uint256  requiredPayment   (offset 68, 32 bytes)
+///   address  quoterAddress     (offset 4,   20 bytes)
+///   bytes32  payeeAddress      (offset 24,  32 bytes)
+///   uint16   srcChain          (offset 56,   2 bytes)
+///   uint16   dstChain          (offset 58,   2 bytes)
+///   uint64   expiryTime        (offset 60,   8 bytes)
+///   uint256  gasLimit          (offset 68,  32 bytes)
+///   uint256  requiredPayment   (offset 100, 32 bytes)
 export function encodeQuoteBody(body: QuoteBody): Uint8Array {
   if (body.srcChain < 0 || body.srcChain > UINT16_MAX) {
     throw new RangeError(`srcChain ${body.srcChain} out of uint16 range`);
@@ -61,6 +67,9 @@ export function encodeQuoteBody(body: QuoteBody): Uint8Array {
   }
   if (body.expiryTime < 0n || body.expiryTime > UINT64_MAX) {
     throw new RangeError(`expiryTime ${body.expiryTime} out of uint64 range`);
+  }
+  if (body.gasLimit < 0n || body.gasLimit > UINT256_MAX) {
+    throw new RangeError(`gasLimit ${body.gasLimit} out of uint256 range`);
   }
   if (body.requiredPayment < 0n || body.requiredPayment > UINT256_MAX) {
     throw new RangeError(
@@ -88,11 +97,12 @@ export function encodeQuoteBody(body: QuoteBody): Uint8Array {
   // DataView lacks setBigUint64 in older Node ESM lib targets in some setups;
   // we have ES2022 here, so it is available.
   view.setBigUint64(60, body.expiryTime, false);
-  out.set(getBytes(toBeHex(body.requiredPayment, 32)), 68);
+  out.set(getBytes(toBeHex(body.gasLimit, 32)), 68);
+  out.set(getBytes(toBeHex(body.requiredPayment, 32)), 100);
   return out;
 }
 
-/// Sign the 100-byte body with the quoter key and return the concatenated 165-byte
+/// Sign the 132-byte body with the quoter key and return the concatenated 197-byte
 /// signedQuoteBytes. The signature covers keccak256(body) directly — no EIP-191 prefix,
 /// matching SpecialRelayer._recoverQuoteSigner.
 export function signQuote(
@@ -122,13 +132,15 @@ export function decodeSignedQuote(signedQuoteBytes: string): SignedQuote {
   const srcChain = view.getUint16(56, false);
   const dstChain = view.getUint16(58, false);
   const expiryTime = view.getBigUint64(60, false);
-  const requiredPayment = BigInt(hexlify(bytes.slice(68, 100)));
+  const gasLimit = BigInt(hexlify(bytes.slice(68, 100)));
+  const requiredPayment = BigInt(hexlify(bytes.slice(100, 132)));
   return {
     quoterAddress,
     payeeAddress,
     srcChain,
     dstChain,
     expiryTime,
+    gasLimit,
     requiredPayment,
     signedQuoteBytes: hexlify(bytes),
   };
