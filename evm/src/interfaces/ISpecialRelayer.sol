@@ -15,15 +15,12 @@ interface ISpecialRelayer {
         bytes calldata relayInstructions
     ) external view returns (uint256 nativePriceQuote);
 
-    function requestDelivery(address sourceContract, uint16 targetChain, uint256 additionalValue, uint64 sequence)
-        external
-        payable;
-
-    function requestDelivery(
-        address sourceContract,
-        uint16 targetChain,
-        uint256 additionalValue,
-        uint64 sequence,
-        bytes calldata signedQuoteBytes
+    function requestExecution(
+        uint16 dstChain,
+        bytes32 dstAddr,
+        address refundAddr,
+        bytes calldata signedQuoteBytes,
+        bytes calldata requestBytes,
+        bytes calldata relayInstructions
     ) external payable;
 }

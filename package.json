@@ -41,7 +41,8 @@
     "sui/ts",
     "sdk/route",
     "sdk/examples",
-    "cli"
+    "cli",
+    "quoter-service"
   ],
   "overrides": {
     "ts-jest": {
