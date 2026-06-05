@@ -42,7 +42,8 @@
     "sdk/route",
     "sdk/examples",
     "cli",
-    "quoter-service"
+    "quoter-service",
+    "relayer-bot"
   ],
   "overrides": {
     "ts-jest": {
