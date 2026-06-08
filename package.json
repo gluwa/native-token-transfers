@@ -42,7 +42,8 @@
     "sdk/route",
     "sdk/examples",
     "cli",
-    "quoter-service"
+    "quoter-service",
+    "oracle-service"
   ],
   "overrides": {
     "ts-jest": {
