@@ -260,7 +260,12 @@ export class RpcDeliveryModule implements DestinationDeliveryModule {
       }
       return { gasPrice };
     }
-    return {};
+    // Neither EIP-1559 nor legacy gas data came back. Don't broadcast a tx with no fee
+    // fields (the node would reject it, or it could be mined at an unintended price);
+    // treat it as a transient RPC problem and let the retry budget handle it.
+    throw new RetriableDeliveryError(
+      "fee data unavailable: provider returned neither maxFeePerGas nor gasPrice"
+    );
   }
 
   /// Maps a revert to the sentinel "consumed" (idempotent success) or a classified error.

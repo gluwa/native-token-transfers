@@ -92,18 +92,21 @@ d("db (real Postgres)", () => {
           nonceUsed: 5,
         })
       ).toBe(true);
-      // second submit from non-pending state is a no-op (optimistic guard)
+      // A second submit from `submitted` is allowed and updates the hash on the SAME
+      // nonce: this is the replacement-by-fee resubmit path (cron/worker re-broadcast a
+      // stuck tx and record the new hash). See markSubmitted + worker.ts isResubmit.
       expect(
         await TransactionsRepo.markSubmitted(db, rec.id, {
           relayTxHash: "0x" + "ee".repeat(32),
           walletUsed: "0x" + "ab".repeat(20),
-          nonceUsed: 6,
+          nonceUsed: 5,
         })
-      ).toBe(false);
+      ).toBe(true);
       expect(await TransactionsRepo.markConfirmed(db, rec.id)).toBe(true);
       const found = await TransactionsRepo.findBySourceEvent(db, 2, "0x02");
       expect(found?.status).toBe("confirmed");
       expect(found?.nonceUsed).toBe(5);
+      expect(found?.relayTxHash).toBe("0x" + "ee".repeat(32));
     });
 
     it("increments retry_count on failure and reports the budget", async () => {
