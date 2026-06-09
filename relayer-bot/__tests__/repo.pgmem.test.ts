@@ -30,8 +30,10 @@ describe("BlockTrackerRepo (pg-mem)", () => {
   });
 
   it("initializes from genesis and is idempotent", async () => {
-    expect(await BlockTrackerRepo.readOrInit(db, 2, RELAYER, 100n)).toBe(100n);
-    expect(await BlockTrackerRepo.readOrInit(db, 2, RELAYER, 999n)).toBe(100n);
+    // The cursor is the last-scanned block (scan starts at cursor+1), so a genesis of 100
+    // seeds 99 — that way block 100 itself is the first block scanned.
+    expect(await BlockTrackerRepo.readOrInit(db, 2, RELAYER, 100n)).toBe(99n);
+    expect(await BlockTrackerRepo.readOrInit(db, 2, RELAYER, 999n)).toBe(99n);
   });
 
   it("advances monotonically", async () => {

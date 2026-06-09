@@ -102,8 +102,9 @@ describe("scanChainOnce", () => {
   });
 
   it("does nothing when the head is not past the cursor", async () => {
+    // genesis 100 seeds the cursor at 99 (last-scanned), so a head of 99 is "not past it".
     await BlockTrackerRepo.readOrInit(db, 2, RELAYER, 100n);
-    const deps = makeDeps(db, queue, fakeEventSource(100n, []));
+    const deps = makeDeps(db, queue, fakeEventSource(99n, []));
     const res = await scanChainOnce(deps, CHAIN);
     expect(res.count).toBe(0);
     expect(queue.size()).toBe(0);

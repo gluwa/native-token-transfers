@@ -4,6 +4,11 @@ import type { Queryable } from "./pool.js";
 export const BlockTrackerRepo = {
   /// Read the last scanned block for (chain, relayer), inserting a genesis row if none
   /// exists. Returns the current cursor.
+  ///
+  /// The cursor is the LAST block already scanned (the listener scans `from = cursor + 1`),
+  /// so to make `genesisBlock` itself the first block scanned we seed the cursor at
+  /// `genesisBlock - 1`. (For genesisBlock = 0 this stores -1, i.e. "nothing scanned yet",
+  /// which is correct — the first scan then covers block 0 inclusively.)
   async readOrInit(
     db: Queryable,
     chainId: ChainId,
@@ -14,7 +19,7 @@ export const BlockTrackerRepo = {
       `INSERT INTO block_tracker (chain_id, relayer_address, last_scanned_block)
        VALUES ($1, $2, $3)
        ON CONFLICT (chain_id, relayer_address) DO NOTHING`,
-      [chainId, relayerAddress, genesisBlock.toString()]
+      [chainId, relayerAddress, (genesisBlock - 1n).toString()]
     );
     const res = await db.query<{ last_scanned_block: string }>(
       `SELECT last_scanned_block FROM block_tracker

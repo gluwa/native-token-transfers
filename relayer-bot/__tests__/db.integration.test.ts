@@ -190,13 +190,11 @@ d("db (real Postgres)", () => {
   describe("BlockTrackerRepo", () => {
     it("initializes from genesis then advances monotonically", async () => {
       const relayer = "0x" + "33".repeat(20);
-      expect(await BlockTrackerRepo.readOrInit(db, 2, relayer, 100n)).toBe(
-        100n
-      );
+      // cursor = last-scanned block (scan starts at cursor+1), so genesis 100 seeds 99 and
+      // block 100 is the first scanned.
+      expect(await BlockTrackerRepo.readOrInit(db, 2, relayer, 100n)).toBe(99n);
       // re-init keeps the existing value
-      expect(await BlockTrackerRepo.readOrInit(db, 2, relayer, 999n)).toBe(
-        100n
-      );
+      expect(await BlockTrackerRepo.readOrInit(db, 2, relayer, 999n)).toBe(99n);
       expect(await BlockTrackerRepo.advance(db, 2, relayer, 150n)).toBe(true);
       expect(await BlockTrackerRepo.readOrInit(db, 2, relayer, 0n)).toBe(150n);
       // backward advance is rejected
