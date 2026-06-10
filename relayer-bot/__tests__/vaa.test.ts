@@ -144,4 +144,11 @@ describe("packSignedVaa / parseSignedVaa", () => {
     expect(parsed.payload).toBe("0x");
     expect(parsed.sequence).toBe((1n << 64n) - 1n);
   });
+
+  it("rejects an unsupported VAA version rather than mis-parsing it", () => {
+    const { vaa } = packSignedVaa(FIELDS, 0, sign);
+    const bytes = getBytes(vaa);
+    bytes[0] = 2; // bump the version byte to an unsupported value
+    expect(() => parseSignedVaa(bytes)).toThrow(/unsupported VAA version 2/);
+  });
 });

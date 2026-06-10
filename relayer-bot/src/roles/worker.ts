@@ -195,10 +195,18 @@ async function processDelivery(
       const lease = await walletPool.reserve(
         rec.destinationChainId,
         async (tx, l) => {
-          await TransactionsRepo.markSubmitting(tx, rec.id, {
+          const ok = await TransactionsRepo.markSubmitting(tx, rec.id, {
             walletUsed: l.address,
             nonceUsed: l.nonce,
           });
+          // 0 rows updated => the row left pending/failed/submitting concurrently (e.g. the
+          // cron confirmed it from a receipt). Throw so reserve() rolls back the reservation
+          // (releasing the nonce) instead of broadcasting against a stale row.
+          if (!ok) {
+            throw new Error(
+              `markSubmitting updated no row for ${rec.id} (status changed concurrently)`
+            );
+          }
         }
       );
       ({ address, nonce, signer } = lease);

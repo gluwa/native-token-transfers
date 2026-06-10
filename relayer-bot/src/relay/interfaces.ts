@@ -98,12 +98,24 @@ export interface DestinationDeliveryModule {
   dispose?(): void;
 }
 
+/// A mined transaction receipt as the cron needs it. `gasUsed`/`gasLimit` let the cron tell
+/// an out-of-gas revert (worth a gas-bumped retry) from a deterministic one (dead-letter).
+/// They are optional so a provider that can't cheaply supply them degrades to retry-on-revert.
+export interface ReceiptInfo {
+  status: 0 | 1;
+  blockNumber: number;
+  gasUsed?: bigint;
+  gasLimit?: bigint;
+}
+
 /// Used by the cron role to reconcile submitted txs.
 export interface ReceiptProvider {
-  getReceipt(
-    chainId: ChainId,
-    txHash: Hex
-  ): Promise<{ status: 0 | 1; blockNumber: number } | null>;
+  getReceipt(chainId: ChainId, txHash: Hex): Promise<ReceiptInfo | null>;
+  /// Whether the node still has any record of the tx (mempool or mined). A `submitted` row
+  /// with no receipt whose hash is unknown was silently dropped before the mempool — its
+  /// nonce was never consumed, so the cron can resubmit it immediately. Optional: a provider
+  /// that can't answer falls back to the slower stuck-tx timeout.
+  isTxKnown?(chainId: ChainId, txHash: Hex): Promise<boolean>;
   dispose?(): void;
 }
 

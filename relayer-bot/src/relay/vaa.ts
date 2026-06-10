@@ -149,6 +149,13 @@ export function parseSignedVaa(vaa: Uint8Array | Hex): ParsedVaa {
   }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const version = view.getUint8(0);
+  // We only know how to parse v1 VAAs (the header/signature/body layout above). A future
+  // Wormhole version would have a different layout, so reject rather than mis-parse it.
+  if (version !== VAA_VERSION) {
+    throw new RangeError(
+      `unsupported VAA version ${version} (only v${VAA_VERSION} is supported)`
+    );
+  }
   const guardianSetIndex = view.getUint32(1, false);
   const numSignatures = view.getUint8(5);
 

@@ -114,10 +114,12 @@ async function checkRpc(
   providers: Map<ChainId, Provider>,
   logger: ReturnType<typeof createLogger>
 ): Promise<void> {
-  for (const [chainId, provider] of providers) {
-    const block = await provider.getBlockNumber();
-    logger.info("startup.rpc_ok", { chain_id: chainId, head: block });
-  }
+  await Promise.all(
+    [...providers].map(async ([chainId, provider]) => {
+      const block = await provider.getBlockNumber();
+      logger.info("startup.rpc_ok", { chain_id: chainId, head: block });
+    })
+  );
 }
 
 async function main(): Promise<void> {

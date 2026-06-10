@@ -30,10 +30,10 @@ export interface RelayerBotConfig {
   walletSecretNames: string[];
   /// Read wallet keys from env (EnvSecretStore) instead of Key Vault. Dev/test only.
   useDevSecrets: boolean;
-  /// Max block span per getLogs scan (the doc's SCAN_INTERVAL_MS, which is really a block
-  /// count despite the name).
+  /// Max block span per getLogs scan. (The design doc calls this SCAN_INTERVAL_MS, but it is
+  /// a block count, not a duration — set via SCAN_BLOCK_RANGE.)
   scanBlockRange: number;
-  /// Sleep between scan iterations, ms (the real loop delay; see SCAN_INTERVAL_MS note).
+  /// Sleep between scan iterations, ms (the real loop delay).
   scanLoopDelayMs: number;
   /// Queue visibility timeout (ms): an unacked in-flight message becomes visible again
   /// after this, so a crashed worker's message is reprocessed.
@@ -286,8 +286,13 @@ export function loadConfig(
     walletSecretNames,
     useDevSecrets,
     scanBlockRange: parseIntInRange(
-      env,
-      "SCAN_INTERVAL_MS",
+      // SCAN_BLOCK_RANGE is the clear name; SCAN_INTERVAL_MS is the legacy doc name (it was
+      // always a block count, never a duration) — accepted for back-compat.
+      {
+        ...env,
+        SCAN_BLOCK_RANGE: env["SCAN_BLOCK_RANGE"] ?? env["SCAN_INTERVAL_MS"],
+      },
+      "SCAN_BLOCK_RANGE",
       "200",
       1,
       1_000_000

@@ -94,24 +94,36 @@ export async function scanChainOnce(
 }
 
 /// Startup sweep: re-publish any pending rows with no relay tx yet (their queue message
-/// may have been lost if the listener crashed between commit and publish).
+/// may have been lost if the listener crashed between commit and publish). Pages through
+/// the entire backlog in keyset batches — a crash can orphan arbitrarily many rows, so a
+/// single bounded query would silently leave the tail unrecovered.
 export async function republishPending(
   deps: ListenerDeps,
-  limit = 500
+  batchSize = 500
 ): Promise<number> {
-  const pending = await TransactionsRepo.selectByStatus(
-    deps.db,
-    "pending",
-    limit
-  );
-  for (const rec of pending) {
-    if (rec.relayTxHash) continue;
-    await deps.queue.publish(recordToMessage(rec));
+  let cursor: { createdAt: Date; id: string } | undefined;
+  let total = 0;
+  for (;;) {
+    const page = await TransactionsRepo.selectByStatus(
+      deps.db,
+      "pending",
+      batchSize,
+      cursor
+    );
+    if (page.length === 0) break;
+    for (const rec of page) {
+      if (rec.relayTxHash) continue;
+      await deps.queue.publish(recordToMessage(rec));
+    }
+    total += page.length;
+    const last = page[page.length - 1]!;
+    cursor = { createdAt: last.createdAt, id: last.id };
+    if (page.length < batchSize) break;
   }
-  if (pending.length > 0) {
-    deps.logger.info("listener.republished_pending", { count: pending.length });
+  if (total > 0) {
+    deps.logger.info("listener.republished_pending", { count: total });
   }
-  return pending.length;
+  return total;
 }
 
 /// Long-running listener: one scan loop per source chain, each isolated so one chain's

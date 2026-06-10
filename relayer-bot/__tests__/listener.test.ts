@@ -154,4 +154,30 @@ describe("republishPending", () => {
       await close();
     }
   });
+
+  it("pages through a backlog larger than the batch size", async () => {
+    const { db, close } = setupPgMem();
+    const queue = new InMemoryQueue();
+    try {
+      for (let i = 0; i < 5; i++) {
+        await TransactionsRepo.insertPending(db, {
+          sourceChainId: 2,
+          destinationChainId: 6,
+          relayerAddress: RELAYER,
+          eventTxHash: `0xdd${i}`,
+          payload: { dstChain: 6 },
+          maxRetries: 2,
+        });
+      }
+      // batchSize 2 forces three keyset pages (2 + 2 + 1) — all five must be republished.
+      const n = await republishPending(
+        makeDeps(db, queue, fakeEventSource(0n, [])),
+        2
+      );
+      expect(n).toBe(5);
+      expect(queue.size()).toBe(5);
+    } finally {
+      await close();
+    }
+  });
 });

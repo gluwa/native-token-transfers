@@ -7,12 +7,27 @@ import { TransactionsRepo } from "../db/transactions.js";
 import type { Logger } from "../logger.js";
 import type { Alerter } from "../alerts/alerter.js";
 import type { Queue } from "../queue/queue.js";
-import type { ReceiptProvider } from "../relay/interfaces.js";
+import type { ReceiptInfo, ReceiptProvider } from "../relay/interfaces.js";
 import type { TransactionRecord } from "../types.js";
 import { realSleep, recordToMessage } from "./shared.js";
 
 const LEADER_LOCK_KEY = 776_130_002;
 const BATCH = 100;
+
+/// A tx that ran out of gas consumes (essentially) its whole gas limit, so a near-full
+/// gasUsed/gasLimit ratio is the out-of-gas signal — worth a gas-bumped fresh retry. A
+/// revert that left gas on the table is deterministic (bad calldata, a require) and retrying
+/// can't help. When the receipt didn't carry both figures we can't tell, so we retry (the
+/// historical behavior) rather than risk dead-lettering a recoverable delivery.
+const OUT_OF_GAS_RATIO = 95n; // percent
+
+function revertedLikelyOutOfGas(receipt: ReceiptInfo): boolean {
+  if (receipt.gasUsed === undefined || receipt.gasLimit === undefined) {
+    return true;
+  }
+  if (receipt.gasLimit <= 0n) return true;
+  return receipt.gasUsed * 100n >= receipt.gasLimit * OUT_OF_GAS_RATIO;
+}
 
 export interface CronDeps {
   config: RelayerBotConfig;
@@ -152,8 +167,19 @@ export async function cronTick(deps: CronDeps): Promise<void> {
         rec.relayTxHash
       );
       if (receipt === null) {
-        // Not mined yet. If it's been far longer than the timeout, the tx is stuck/dropped
-        // → replace it on the same nonce with a higher fee.
+        // Not mined. This row is already older than submittedTimeoutMin (the stale cutoff),
+        // so propagation delay is ruled out: if the node has no record of the tx, it was
+        // silently dropped before the mempool — the reserved nonce was never consumed, so
+        // resubmit it (same nonce) right away rather than waiting out the stuck-tx timeout. A
+        // tx the node still knows (pending in the mempool) is only replaced once it's clearly
+        // stuck (far past the timeout) to avoid needless fee bumps on a tx about to mine.
+        const known = receipts.isTxKnown
+          ? await receipts.isTxKnown(rec.destinationChainId, rec.relayTxHash)
+          : true;
+        if (!known) {
+          await resubmit(deps, rec, "submitted tx dropped before mempool");
+          continue;
+        }
         const ageMs = now() - rec.updatedAt.getTime();
         if (ageMs > 2 * config.submittedTimeoutMin * 60_000) {
           await resubmit(deps, rec, "submitted timeout: no receipt");
@@ -168,9 +194,26 @@ export async function cronTick(deps: CronDeps): Promise<void> {
           event_tx_hash: rec.eventTxHash,
           relay_tx_hash: rec.relayTxHash,
         });
+      } else if (revertedLikelyOutOfGas(receipt)) {
+        // Mined + reverted, gas ~exhausted → likely under-estimated; the nonce was consumed,
+        // so retry with a fresh nonce (the retry path bumps the gas limit).
+        await retryFresh(
+          deps,
+          rec,
+          "destination tx reverted (likely out of gas)"
+        );
       } else {
-        // Mined + reverted → the nonce was consumed; retry with a fresh nonce.
-        await retryFresh(deps, rec, "destination tx reverted");
+        // Mined + reverted well under the gas limit → a deterministic revert; retrying with
+        // the same calldata can't help, so dead-letter immediately and stop burning retries.
+        const reason = "destination tx reverted (deterministic, not gas)";
+        await TransactionsRepo.markDeadLetter(db, rec.id, reason);
+        logger.warn("tx.transition", {
+          from: "submitted",
+          to: "dead_letter",
+          event_tx_hash: rec.eventTxHash,
+          relay_tx_hash: rec.relayTxHash,
+          reason,
+        });
       }
     }
   });

@@ -226,17 +226,32 @@ export const TransactionsRepo = {
     return res.rows.map(rowToRecord);
   },
 
-  /// Rows currently in `status` (oldest first). Used by the listener's startup sweep to
-  /// re-publish pending rows whose queue message may have been lost on a crash.
+  /// Rows currently in `status` (oldest first), one keyset page at a time. Used by the
+  /// listener's startup sweep to re-publish pending rows whose queue message may have been
+  /// lost on a crash. `after` is the (created_at, id) cursor of the last row of the previous
+  /// page — keyset (not OFFSET) so the sweep can page through unbounded backlogs without
+  /// re-reading or skipping rows even as workers concurrently move rows out of the status.
   async selectByStatus(
     db: Queryable,
     status: TxStatus,
-    limit: number
+    limit: number,
+    after?: { createdAt: Date; id: string }
   ): Promise<TransactionRecord[]> {
-    const res = await db.query<Row>(
-      `SELECT * FROM transactions WHERE status = $1 ORDER BY created_at LIMIT $2`,
-      [status, limit]
-    );
+    const res = after
+      ? await db.query<Row>(
+          // Expanded keyset comparison (equivalent to (created_at, id) > ($2, $3)) — the
+          // row-value tuple form isn't supported by pg-mem.
+          `SELECT * FROM transactions
+             WHERE status = $1
+               AND (created_at > $2 OR (created_at = $2 AND id > $3))
+             ORDER BY created_at, id LIMIT $4`,
+          [status, after.createdAt, after.id, limit]
+        )
+      : await db.query<Row>(
+          `SELECT * FROM transactions WHERE status = $1
+             ORDER BY created_at, id LIMIT $2`,
+          [status, limit]
+        );
     return res.rows.map(rowToRecord);
   },
 

@@ -5,7 +5,7 @@ import type { Database } from "../src/db/pool.js";
 import { createLogger } from "../src/logger.js";
 import type { Alerter } from "../src/alerts/alerter.js";
 import { InMemoryQueue } from "../src/queue/inMemory.js";
-import type { ReceiptProvider } from "../src/relay/interfaces.js";
+import type { ReceiptInfo, ReceiptProvider } from "../src/relay/interfaces.js";
 import { cronTick, type CronDeps } from "../src/roles/cron.js";
 import type { TxStatus } from "../src/types.js";
 
@@ -119,9 +119,13 @@ function fakeDb(opts: {
 }
 
 function fakeReceipts(
-  result: { status: 0 | 1; blockNumber: number } | null
+  result: ReceiptInfo | null,
+  known?: boolean
 ): ReceiptProvider {
-  return { getReceipt: async () => result };
+  return {
+    getReceipt: async () => result,
+    ...(known === undefined ? {} : { isTxKnown: async () => known }),
+  };
 }
 
 function spyAlerter(): { alerter: Alerter; events: string[] } {
@@ -192,6 +196,50 @@ describe("cronTick", () => {
     expect(d!.message.replace_nonce).toBeUndefined();
   });
 
+  it("retries an out-of-gas revert (gasUsed ~= gasLimit) with a fresh nonce", async () => {
+    const fdb = fakeDb({
+      staleSubmitted: [staleRow({ id: "G" })],
+      failResult: { retry_count: 1, max_retries: 2 },
+    });
+    const { alerter } = spyAlerter();
+    const { cron, queue } = deps(
+      fdb,
+      fakeReceipts({
+        status: 0,
+        blockNumber: 10,
+        gasUsed: 99_000n,
+        gasLimit: 100_000n,
+      }),
+      config(),
+      alerter
+    );
+    await cronTick(cron);
+    expect(fdb.failed).toEqual(["G"]); // retryFresh → markFailed
+    expect(fdb.deadLettered).toEqual([]);
+    const [d] = await queue.consume(2, { max: 1, blockMs: 0 });
+    expect(d!.message.replace_nonce).toBeUndefined();
+  });
+
+  it("dead-letters a deterministic revert (gas left on the table) without retrying", async () => {
+    const fdb = fakeDb({ staleSubmitted: [staleRow({ id: "D" })] });
+    const { alerter } = spyAlerter();
+    const { cron, queue } = deps(
+      fdb,
+      fakeReceipts({
+        status: 0,
+        blockNumber: 10,
+        gasUsed: 30_000n,
+        gasLimit: 100_000n,
+      }),
+      config(),
+      alerter
+    );
+    await cronTick(cron);
+    expect(fdb.deadLettered).toEqual(["D"]);
+    expect(fdb.failed).toEqual([]); // no retry budget spent
+    expect(queue.size()).toBe(0);
+  });
+
   it("dead-letters a reverted tx when the budget is exhausted", async () => {
     const fdb = fakeDb({
       staleSubmitted: [staleRow({ id: "3" })],
@@ -223,6 +271,45 @@ describe("cronTick", () => {
     expect(fdb.failed).toEqual([]); // NOT markFailed — nonce stays counted
     const [d] = await queue.consume(2, { max: 1, blockMs: 0 });
     expect(d!.message.replace_nonce).toBe(1);
+  });
+
+  it("resubmits a dropped tx immediately (unknown to the node, before the stuck timeout)", async () => {
+    // Freshly updated row (not past the 2× stuck timeout) — only the dropped-tx detection
+    // can trigger a resubmit here.
+    const fdb = fakeDb({
+      staleSubmitted: [staleRow({ id: "X", updatedAt: new Date() })],
+      incrementResult: { retry_count: 1, max_retries: 3 },
+    });
+    const { alerter } = spyAlerter();
+    const { cron, queue } = deps(
+      fdb,
+      fakeReceipts(null, false), // no receipt + node has no record of the tx => dropped
+      config(),
+      alerter
+    );
+    await cronTick(cron);
+    expect(fdb.incremented).toEqual(["X"]); // resubmit (same nonce), nonce stays counted
+    expect(fdb.failed).toEqual([]);
+    const [d] = await queue.consume(2, { max: 1, blockMs: 0 });
+    expect(d!.message.replace_nonce).toBe(1);
+  });
+
+  it("leaves a still-pending tx alone until the stuck timeout (known to the node)", async () => {
+    const fdb = fakeDb({
+      staleSubmitted: [staleRow({ id: "P", updatedAt: new Date() })],
+      incrementResult: { retry_count: 1, max_retries: 3 },
+    });
+    const { alerter } = spyAlerter();
+    const { cron, queue } = deps(
+      fdb,
+      fakeReceipts(null, true), // no receipt but still in the mempool => wait, don't replace
+      config(),
+      alerter
+    );
+    await cronTick(cron);
+    expect(fdb.incremented).toEqual([]);
+    expect(fdb.failed).toEqual([]);
+    expect(queue.size()).toBe(0);
   });
 
   it("recovers a crashed `submitting` row by resubmitting its nonce", async () => {

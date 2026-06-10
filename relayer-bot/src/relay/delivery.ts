@@ -269,8 +269,10 @@ export class RpcDeliveryModule implements DestinationDeliveryModule {
   }
 
   /// Maps a revert to the sentinel "consumed" (idempotent success) or a classified error.
-  /// Default (undecodable / unknown) is Retriable — a failed delivery is assumed retryable
-  /// due to a low gas limit.
+  /// This runs pre-broadcast (estimateGas / eth_call), where there is no receipt to read
+  /// gasUsed from, so we can't attribute a default revert to gas — we treat an undecodable
+  /// revert as Retriable and let the on-chain receipt (cron) make the gas-vs-deterministic
+  /// call once the tx has actually mined.
   private classifyRevert(
     err: unknown
   ):
@@ -292,7 +294,7 @@ export class RpcDeliveryModule implements DestinationDeliveryModule {
         return new DeferDeliveryError("destination reports InvalidVaa");
       default:
         return new RetriableDeliveryError(
-          `delivery reverted (likely low gas limit): ${
+          `delivery reverted with an unrecognized error: ${
             err instanceof Error ? err.message : String(err)
           }`
         );
