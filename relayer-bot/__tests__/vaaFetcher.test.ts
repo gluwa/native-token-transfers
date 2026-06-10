@@ -1,8 +1,14 @@
-import { type Provider, getAddress, zeroPadValue } from "ethers";
+import {
+  type Provider,
+  SigningKey,
+  getAddress,
+  getBytes,
+  zeroPadValue,
+} from "ethers";
 
 import { coreInterface } from "../src/abi.js";
 import type { VaaId } from "../src/relay/interfaces.js";
-import { parseSignedVaa } from "../src/relay/vaa.js";
+import { packSignedVaa, parseSignedVaa } from "../src/relay/vaa.js";
 import {
   DevGuardianVaaFetcher,
   WormholescanVaaFetcher,
@@ -10,6 +16,29 @@ import {
 
 const EMITTER_EVM = getAddress("0x" + "22".repeat(20));
 const EMITTER_UNIVERSAL = zeroPadValue(EMITTER_EVM, 32);
+
+/// A well-formed signed VAA for the given id — the fetcher now parses and validates the
+/// response, so stubs must serve real bytes.
+function signedVaaFor(id: VaaId): Uint8Array {
+  const key = new SigningKey("0x" + "01".repeat(32));
+  const { vaa } = packSignedVaa(
+    {
+      timestamp: 0,
+      nonce: 1,
+      emitterChainId: id.emitterChain,
+      emitterAddress: id.emitterAddress,
+      sequence: id.sequence,
+      consistencyLevel: 1,
+      payload: "0x9945ff10",
+    },
+    0,
+    (digest) => {
+      const sig = key.sign(digest);
+      return { r: sig.r, s: sig.s, v: sig.yParity };
+    }
+  );
+  return getBytes(vaa);
+}
 
 interface StubResponse {
   status: number;
@@ -49,7 +78,7 @@ describe("WormholescanVaaFetcher", () => {
   };
 
   it("builds the signed_vaa URL and base64-decodes vaaBytes", async () => {
-    const raw = new Uint8Array([1, 2, 3, 4, 250]);
+    const raw = signedVaaFor(id);
     const b64 = Buffer.from(raw).toString("base64");
     const { impl, urls } = stubFetch([
       { status: 200, body: { vaaBytes: b64 } },
@@ -78,7 +107,7 @@ describe("WormholescanVaaFetcher", () => {
   });
 
   it("retries 5xx and eventually succeeds", async () => {
-    const raw = new Uint8Array([9, 9]);
+    const raw = signedVaaFor(id);
     const b64 = Buffer.from(raw).toString("base64");
     const { impl, urls } = stubFetch([
       { status: 503 },
@@ -92,6 +121,19 @@ describe("WormholescanVaaFetcher", () => {
     });
     expect(await fetcher.fetchVaa(id)).toEqual(raw);
     expect(urls).toHaveLength(2);
+  });
+
+  it("rejects a VAA that doesn't match the requested emitter/sequence", async () => {
+    // Wormholescan returns a valid VAA — but for a different sequence.
+    const wrong = signedVaaFor({ ...id, sequence: 9999n });
+    const b64 = Buffer.from(wrong).toString("base64");
+    const { impl } = stubFetch([{ status: 200, body: { vaaBytes: b64 } }]);
+    const fetcher = new WormholescanVaaFetcher({
+      baseUrl: "https://api.wormholescan.io",
+      fetchImpl: impl,
+      retry: { maxAttempts: 1, initialDelayMs: 0, maxDelayMs: 0 },
+    });
+    await expect(fetcher.fetchVaa(id)).rejects.toThrow(/different VAA/);
   });
 
   it("throws on a persistent 5xx", async () => {

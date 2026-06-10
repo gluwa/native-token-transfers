@@ -135,6 +135,66 @@ describe("TransactionsRepo (pg-mem)", () => {
     ).toBe("confirmed");
   });
 
+  it("clears a never-broadcast nonce when confirming (already-consumed path)", async () => {
+    const W = "0x" + "ab".repeat(20);
+    // Crash window: `submitting` committed (nonce reserved) but never broadcast — no
+    // relay_tx_hash. Someone else delivers the VAA; the worker confirms via isVAAConsumed.
+    const rec = await TransactionsRepo.insertPending(db, insertInput("0xe1"));
+    await TransactionsRepo.markSubmitting(db, rec.id, {
+      walletUsed: W,
+      nonceUsed: 7,
+    });
+    expect(await TransactionsRepo.markConfirmed(db, rec.id)).toBe(true);
+    const found = await TransactionsRepo.findBySourceEvent(db, 2, "0xe1");
+    expect(found?.status).toBe("confirmed");
+    // The nonce never reached the chain; keeping it would wedge the wallet (the max()
+    // scan counts confirmed rows and every later tx gaps behind the phantom nonce).
+    expect(found?.nonceUsed).toBeNull();
+  });
+
+  it("keeps the nonce when confirming a row whose tx was broadcast", async () => {
+    const W = "0x" + "ab".repeat(20);
+    const rec = await TransactionsRepo.insertPending(db, insertInput("0xe2"));
+    await TransactionsRepo.markSubmitting(db, rec.id, {
+      walletUsed: W,
+      nonceUsed: 7,
+    });
+    await TransactionsRepo.markSubmitted(db, rec.id, {
+      relayTxHash: "0x" + "de".repeat(32),
+      walletUsed: W,
+      nonceUsed: 7,
+    });
+    expect(await TransactionsRepo.markConfirmed(db, rec.id)).toBe(true);
+    // Broadcast happened — the tx will consume the nonce on-chain; keep it counted.
+    expect(
+      (await TransactionsRepo.findBySourceEvent(db, 2, "0xe2"))?.nonceUsed
+    ).toBe(7);
+  });
+
+  it("clears a never-broadcast nonce when dead-lettering", async () => {
+    const W = "0x" + "ab".repeat(20);
+    const rec = await TransactionsRepo.insertPending(db, insertInput("0xe3"));
+    await TransactionsRepo.markSubmitting(db, rec.id, {
+      walletUsed: W,
+      nonceUsed: 9,
+    });
+    expect(await TransactionsRepo.markDeadLetter(db, rec.id, "gave up")).toBe(
+      true
+    );
+    const found = await TransactionsRepo.findBySourceEvent(db, 2, "0xe3");
+    expect(found?.status).toBe("dead_letter");
+    expect(found?.nonceUsed).toBeNull(); // releases the nonce for gap-fill
+  });
+
+  it("touch bumps updated_at without changing state", async () => {
+    const rec = await TransactionsRepo.insertPending(db, insertInput("0xe4"));
+    await db.query("UPDATE transactions SET updated_at = '2020-01-01'");
+    await TransactionsRepo.touch(db, rec.id);
+    const found = await TransactionsRepo.findBySourceEvent(db, 2, "0xe4");
+    expect(found?.status).toBe("pending");
+    expect(found!.updatedAt.getFullYear()).toBeGreaterThan(2020);
+  });
+
   it("counts failures and dead-letters", async () => {
     const rec = await TransactionsRepo.insertPending(db, insertInput("0xcc"));
     expect(

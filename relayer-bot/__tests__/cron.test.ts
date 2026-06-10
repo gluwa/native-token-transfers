@@ -62,6 +62,8 @@ interface FakeDb {
 function fakeDb(opts: {
   staleSubmitted?: Record<string, unknown>[];
   staleSubmitting?: Record<string, unknown>[];
+  stalePending?: Record<string, unknown>[];
+  staleFailed?: Record<string, unknown>[];
   failResult?: Budget;
   incrementResult?: Budget | null;
   deadLetterCount?: number;
@@ -74,10 +76,14 @@ function fakeDb(opts: {
     query: (async (sql: string, params?: unknown[]) => {
       if (sql.includes("SKIP LOCKED")) {
         const status = params![0] as string;
-        const rows =
-          status === "submitting"
-            ? (opts.staleSubmitting ?? [])
-            : (opts.staleSubmitted ?? []);
+        const byStatus: Record<string, Record<string, unknown>[] | undefined> =
+          {
+            submitting: opts.staleSubmitting,
+            submitted: opts.staleSubmitted,
+            pending: opts.stalePending,
+            failed: opts.staleFailed,
+          };
+        const rows = byStatus[status] ?? [];
         return { rows, rowCount: rows.length };
       }
       if (sql.includes("SET status = 'confirmed'")) {
@@ -330,6 +336,35 @@ describe("cronTick", () => {
     expect(fdb.incremented).toEqual(["S"]);
     const [d] = await queue.consume(2, { max: 1, blockMs: 0 });
     expect(d!.message.replace_nonce).toBe(1);
+  });
+
+  it("republishes stale pending and failed rows whose queue message was lost", async () => {
+    const fdb = fakeDb({
+      stalePending: [
+        staleRow({ id: "P1", status: "pending", relayTxHash: null }),
+      ],
+      staleFailed: [staleRow({ id: "F1", status: "failed" })],
+    });
+    const { alerter } = spyAlerter();
+    const { cron, queue } = deps(fdb, fakeReceipts(null), config(), alerter);
+    await cronTick(cron);
+    // Both republished as plain messages (no replace_nonce — the worker drives the retry).
+    const got = await queue.consume(2, { max: 10, blockMs: 0 });
+    expect(got).toHaveLength(2);
+    for (const d of got) expect(d.message.replace_nonce).toBeUndefined();
+    // No budget spent and no state transitions — this is recovery, not a retry decision.
+    expect(fdb.failed).toEqual([]);
+    expect(fdb.incremented).toEqual([]);
+  });
+
+  it("does not republish a pending row that already has a relay tx hash", async () => {
+    const fdb = fakeDb({
+      stalePending: [staleRow({ id: "P2", status: "pending" })], // relayTxHash set by default
+    });
+    const { alerter } = spyAlerter();
+    const { cron, queue } = deps(fdb, fakeReceipts(null), config(), alerter);
+    await cronTick(cron);
+    expect(queue.size()).toBe(0);
   });
 
   it("leaves a fresh not-yet-mined tx alone", async () => {

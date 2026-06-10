@@ -17,7 +17,7 @@ export interface ListenerDeps {
   logger: Logger;
   alerter: Alerter;
   heartbeat?: () => void;
-  sleep?: (ms: number) => Promise<void>;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
 
 export interface ScanResult {
@@ -160,7 +160,7 @@ export async function runListener(
         } catch (err) {
           log.error("listener.scan_error", { error: String(err) });
         }
-        await sleep(deps.config.scanLoopDelayMs);
+        await sleep(deps.config.scanLoopDelayMs, signal);
       }
     })
   );

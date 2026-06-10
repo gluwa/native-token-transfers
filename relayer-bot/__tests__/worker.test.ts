@@ -365,6 +365,95 @@ describe("handleDelivery", () => {
     }
   });
 
+  it("skips a dead-lettered row even when the message carries replace_nonce", async () => {
+    const h = await setup();
+    try {
+      const rec = await TransactionsRepo.insertPending(h.db, {
+        sourceChainId: 2,
+        destinationChainId: 6,
+        relayerAddress: RELAYER,
+        eventTxHash: "0x5a",
+        payload: payload("0x5a"),
+        maxRetries: 2,
+      });
+      await TransactionsRepo.markSubmitting(h.db, rec.id, {
+        walletUsed: WALLET,
+        nonceUsed: 3,
+      });
+      await TransactionsRepo.markDeadLetter(h.db, rec.id, "exhausted");
+
+      let prepared = false;
+      const delivery = fakeDelivery({
+        prepare: async () => {
+          prepared = true;
+          return READY;
+        },
+      });
+      // A lingering cron stuck-retry for the now-dead row. Without the terminal-state
+      // skip this loops forever (broadcast → nonce-too-low → defer → nack).
+      await h.queue.publish({ ...message("0x5a"), replace_nonce: 3 });
+      const [d] = await h.queue.consume(2, { max: 1, blockMs: 0 });
+      await handleDelivery(
+        deps(h, delivery, baseConfig(), fakeWalletPool(h.db)),
+        d!
+      );
+      expect(prepared).toBe(false);
+      expect(h.queue.size()).toBe(0); // acked, not requeued
+      const after = await TransactionsRepo.findBySourceEvent(h.db, 2, "0x5a");
+      expect(after?.status).toBe("dead_letter");
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("drops a stale replace_nonce message when the row holds a different nonce", async () => {
+    const h = await setup();
+    try {
+      // The row moved on: a mined-revert retryFresh re-reserved a NEW nonce (8) after the
+      // cron published a replace message for the old one (3).
+      const rec = await TransactionsRepo.insertPending(h.db, {
+        sourceChainId: 2,
+        destinationChainId: 6,
+        relayerAddress: RELAYER,
+        eventTxHash: "0x6a",
+        payload: payload("0x6a"),
+        maxRetries: 5,
+      });
+      await TransactionsRepo.markSubmitting(h.db, rec.id, {
+        walletUsed: WALLET,
+        nonceUsed: 8,
+      });
+      await TransactionsRepo.markSubmitted(h.db, rec.id, {
+        relayTxHash: "0x" + "22".repeat(32),
+        walletUsed: WALLET,
+        nonceUsed: 8,
+      });
+
+      const seen: BroadcastRequest[] = [];
+      const delivery = fakeDelivery({
+        broadcast: async (req) => {
+          seen.push(req);
+          return "0x" + "ff".repeat(32);
+        },
+      });
+      await h.queue.publish({ ...message("0x6a"), replace_nonce: 3 });
+      const [d] = await h.queue.consume(2, { max: 1, blockMs: 0 });
+      await handleDelivery(
+        deps(h, delivery, baseConfig(), fakeWalletPool(h.db)),
+        d!
+      );
+      // Honoring the stale message would broadcast nonce 3 on the current wallet and
+      // clobber the newer attempt's record — it must be acked and ignored instead.
+      expect(seen).toHaveLength(0);
+      expect(h.queue.size()).toBe(0);
+      const after = await TransactionsRepo.findBySourceEvent(h.db, 2, "0x6a");
+      expect(after?.nonceUsed).toBe(8);
+      expect(after?.relayTxHash).toBe("0x" + "22".repeat(32));
+    } finally {
+      await h.close();
+    }
+  });
+
   it("dead-letters a PermanentDeliveryError from prepare", async () => {
     const h = await setup();
     try {
@@ -561,6 +650,84 @@ describe("handleDelivery", () => {
         controller.signal
       );
       expect(order).toEqual(["0xa1", "0xa2", "0xa3"]);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("stands down a partition when the lock session is lost", async () => {
+    const h = await setup();
+    try {
+      await h.queue.publish(message("0xb1"));
+      const controller = new AbortController();
+      let prepared = false;
+      const delivery = fakeDelivery({
+        prepare: async () => {
+          prepared = true;
+          return READY;
+        },
+      });
+      let acquisitions = 0;
+      await runWorker(
+        {
+          ...deps(h, delivery, baseConfig(), fakeWalletPool(h.db)),
+          partitions: [2],
+          blockMs: 0,
+          sleep: async () => {},
+          runUnderPartitionLock: async (_p, fn) => {
+            acquisitions += 1;
+            if (acquisitions === 1) {
+              // Postgres dropped the lock session: another worker may own the partition
+              // now, so the drain loop must exit WITHOUT consuming anything.
+              await fn(() => true);
+              return true;
+            }
+            controller.abort();
+            return false;
+          },
+        },
+        controller.signal
+      );
+      expect(prepared).toBe(false);
+      expect(h.queue.size()).toBe(1); // message left for the new owner
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("touches the row on defer so the cron sees it as actively driven", async () => {
+    const h = await setup();
+    try {
+      // A committed-nonce row (the cron's staleness scan would resubmit it if stale).
+      const rec = await TransactionsRepo.insertPending(h.db, {
+        sourceChainId: 2,
+        destinationChainId: 6,
+        relayerAddress: RELAYER,
+        eventTxHash: "0x7a",
+        payload: payload("0x7a"),
+        maxRetries: 2,
+      });
+      await TransactionsRepo.markSubmitting(h.db, rec.id, {
+        walletUsed: WALLET,
+        nonceUsed: 4,
+      });
+      await h.db.query("UPDATE transactions SET updated_at = '2020-01-01'");
+
+      const delivery = fakeDelivery({
+        prepare: async () => {
+          throw new DeferDeliveryError("VAA not yet available");
+        },
+      });
+      const d = await enqueue(h, "0x7a");
+      await handleDelivery(
+        deps(h, delivery, baseConfig(), fakeWalletPool(h.db)),
+        d
+      );
+      const after = await TransactionsRepo.findBySourceEvent(h.db, 2, "0x7a");
+      expect(after?.status).toBe("submitting"); // unchanged — defer is not a failure
+      expect(after?.retryCount).toBe(0); // budget untouched
+      // updated_at refreshed: the cron's staleness cutoff no longer matches this row.
+      expect(after!.updatedAt.getFullYear()).toBeGreaterThan(2020);
     } finally {
       await h.close();
     }

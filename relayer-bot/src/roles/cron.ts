@@ -44,7 +44,7 @@ export interface CronDeps {
   runUnderLeaderLock?: (fn: () => Promise<void>) => Promise<boolean>;
   heartbeat?: () => void;
   now?: () => number;
-  sleep?: (ms: number) => Promise<void>;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
 
 /// REVERTED tx (mined): the nonce was consumed on-chain, so retry with a FRESH nonce.
@@ -137,6 +137,33 @@ export async function cronTick(deps: CronDeps): Promise<void> {
 
   const acquired = await runLocked(async () => {
     const cutoff = new Date(now() - config.submittedTimeoutMin * 60_000);
+
+    // Re-drive rows whose queue message was lost. `pending` and `failed` rows live ONLY in
+    // Redis between attempts (the worker nacks into a delay set; the listener publishes
+    // after commit) — a Redis restart/failover, a crash between cron's markFailed and its
+    // publish, or a listener publish failure after the scan cursor advanced would otherwise
+    // strand them forever, since nothing else ever looks at these statuses. The worker's
+    // nack backoff caps at ~60s, so a row untouched for the full staleness window has no
+    // live message; republishing is safe regardless (per-message lock + idempotency guard).
+    for (const status of ["pending", "failed"] as const) {
+      const lost = await TransactionsRepo.selectStaleByStatus(
+        db,
+        status,
+        cutoff,
+        BATCH
+      );
+      let republished = 0;
+      for (const rec of lost) {
+        // A pending row with a relay tx is mid-transition elsewhere — leave it. A failed
+        // row's relay_tx_hash is the OLD reverted tx, not an in-flight one; republish it.
+        if (status === "pending" && rec.relayTxHash) continue;
+        await deps.queue.publish(recordToMessage(rec));
+        republished += 1;
+      }
+      if (republished > 0) {
+        logger.info("cron.republished_lost", { status, count: republished });
+      }
+    }
 
     // Recover rows that committed `submitting` but never reached `submitted` — a worker
     // crashed between the intent commit and recording the tx hash. Resubmit the reserved
@@ -244,6 +271,6 @@ export async function runCron(
       deps.logger.error("cron.tick_failed", { error: String(err) });
       await deps.alerter.alert("cron.failure", { error: String(err) });
     }
-    await sleep(deps.config.cronIntervalMin * 60_000);
+    await sleep(deps.config.cronIntervalMin * 60_000, signal);
   }
 }

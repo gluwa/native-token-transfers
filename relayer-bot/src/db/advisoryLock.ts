@@ -26,30 +26,62 @@ export async function tryAcquireWalletLock(
 }
 
 /// Run `fn` while holding a session-scoped advisory lock on a dedicated connection (the
-/// cron leader lock). If another instance holds it, `fn` is skipped and `false` is
-/// returned. The lock spans `fn` (which may do RPC + pool queries) and is released after.
+/// cron leader lock / worker partition locks). If another instance holds it, `fn` is
+/// skipped and `false` is returned. The lock spans `fn` (which may do RPC + pool queries).
+///
+/// Two failure modes are handled explicitly:
+///  - The lock session can DIE while `fn` runs (pg restart, LB idle reaping) — Postgres
+///    then frees the lock and another instance can acquire it while our `fn` is still
+///    running. `fn` receives a `lockLost` probe so long-running holders (the partition
+///    drain loop) can notice and stand down instead of running as a second owner.
+///  - If the UNLOCK query fails, the session may still hold the lock; returning this
+///    connection to the pool would leak the lock indefinitely (the key would be
+///    unacquirable until the pooled backend happens to die). Destroy the connection
+///    instead so Postgres frees the lock with it.
 export async function withLeaderLock(
   pool: Pool,
   key: number | bigint,
-  fn: () => Promise<void>
+  fn: (lockLost?: () => boolean) => Promise<void>
 ): Promise<boolean> {
+  const keyParam = typeof key === "bigint" ? key.toString() : key;
   const client = await pool.connect();
+  let lost = false;
+  const onConnLost = (): void => {
+    lost = true;
+  };
+  client.on("error", onConnLost);
+  client.on("end", onConnLost);
+  let destroyReason: Error | undefined;
+  const toError = (err: unknown): Error =>
+    err instanceof Error ? err : new Error(String(err));
   try {
-    const res = await client.query("SELECT pg_try_advisory_lock($1) AS ok", [
-      typeof key === "bigint" ? key.toString() : key,
-    ]);
-    if ((res.rows[0] as { ok?: boolean } | undefined)?.ok !== true) {
+    let acquired = false;
+    try {
+      const res = await client.query("SELECT pg_try_advisory_lock($1) AS ok", [
+        keyParam,
+      ]);
+      acquired = (res.rows[0] as { ok?: boolean } | undefined)?.ok === true;
+    } catch (err) {
+      // The lock query itself failed — connection state is unknown; don't recycle it.
+      destroyReason = toError(err);
+      throw err;
+    }
+    if (!acquired) {
       return false;
     }
     try {
-      await fn();
+      await fn(() => lost);
       return true;
     } finally {
-      await client.query("SELECT pg_advisory_unlock($1)", [
-        typeof key === "bigint" ? key.toString() : key,
-      ]);
+      try {
+        await client.query("SELECT pg_advisory_unlock($1)", [keyParam]);
+      } catch (err) {
+        destroyReason = toError(err);
+      }
     }
   } finally {
-    client.release();
+    client.removeListener("error", onConnLost);
+    client.removeListener("end", onConnLost);
+    client.release(destroyReason);
   }
 }

@@ -115,6 +115,61 @@ describe("correlate", () => {
     ).rejects.toBeInstanceOf(CorrelationError);
   });
 
+  it("skips a same-payload log from the wrong sender when expectedEmitter is set", async () => {
+    const payload = "0x9945ff10" + "aa".repeat(40);
+    const attacker = getAddress("0x" + "66".repeat(20));
+    const provider = providerWithLogs([
+      // publishMessage is permissionless: an attacker emits an identical payload in the
+      // same tx, with a different sequence, hoping to be attributed as the emitter.
+      coreLog({
+        sender: attacker,
+        sequence: 7n,
+        nonce: 0,
+        payload,
+        consistencyLevel: 1,
+      }),
+      coreLog({
+        sender: SENDER,
+        sequence: 8n,
+        nonce: 1,
+        payload,
+        consistencyLevel: 1,
+      }),
+    ]);
+    const decoded = await correlate({
+      event: baseEvent(payload),
+      sourceProvider: provider,
+      coreAddress: CORE,
+      expectedEmitter: SENDER,
+      retry: NO_RETRY,
+    });
+    // The attacker's log (first in the receipt) must NOT win the first-match scan.
+    expect(decoded.payload.emitterAddress).toBe(zeroPadValue(SENDER, 32));
+    expect(decoded.payload.sequence).toBe("8");
+  });
+
+  it("fails correlation when only wrong-sender logs match and expectedEmitter is set", async () => {
+    const payload = "0x9945ff10" + "bb".repeat(40);
+    const provider = providerWithLogs([
+      coreLog({
+        sender: getAddress("0x" + "66".repeat(20)),
+        sequence: 7n,
+        nonce: 0,
+        payload,
+        consistencyLevel: 1,
+      }),
+    ]);
+    await expect(
+      correlate({
+        event: baseEvent(payload),
+        sourceProvider: provider,
+        coreAddress: CORE,
+        expectedEmitter: SENDER,
+        retry: NO_RETRY,
+      })
+    ).rejects.toBeInstanceOf(CorrelationError);
+  });
+
   it("throws CorrelationError when no payload matches", async () => {
     const provider = providerWithLogs([
       coreLog({

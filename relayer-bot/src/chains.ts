@@ -19,8 +19,10 @@ export interface ChainConfig {
   /// Wormhole Core bridge on this chain (emits LogMessagePublished). Required on source
   /// chains so the correlator can find the published message.
   coreBridgeAddress?: string;
-  /// Expected destination WormholeTransceiver address (20-byte). Optional defense-in-depth
-  /// check: delivery asserts the event's dstAddr decodes to this before sending.
+  /// This chain's WormholeTransceiver address (20-byte). Optional defense-in-depth checks
+  /// in both directions: delivery asserts the event's dstAddr decodes to this before
+  /// sending TO this chain, and the correlator only accepts LogMessagePublished entries
+  /// sent by this address when relaying FROM it (publishMessage is permissionless).
   expectedTransceiver?: string;
   /// Blocks to wait behind the chain head before treating a source log as final. Differs
   /// per chain (e.g. Ethereum ~15, BSC ~15, Avalanche ~1).

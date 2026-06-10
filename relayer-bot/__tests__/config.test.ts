@@ -88,6 +88,7 @@ describe("loadConfig", () => {
   it("worker role requires Key Vault url unless dev secrets are enabled", () => {
     const env = workerEnv();
     delete env.RELAYER_USE_DEV_SECRETS;
+    env.RELAYER_MAX_GAS_PRICE_WEI = "100000000000"; // prod worker also needs the ceiling
     expect(() => loadConfig(env, "worker")).toThrow(/AZURE_KEY_VAULT_URL/);
     // With a Key Vault url it loads.
     const cfg = loadConfig(
@@ -96,6 +97,27 @@ describe("loadConfig", () => {
     );
     expect(cfg.keyVaultUrl).toBe("https://vault.test");
     expect(cfg.useDevSecrets).toBe(false);
+  });
+
+  it("production worker (no dev secrets) requires a fee ceiling", () => {
+    const env = workerEnv();
+    delete env.RELAYER_USE_DEV_SECRETS;
+    env.AZURE_KEY_VAULT_URL = "https://vault.test";
+    expect(() => loadConfig(env, "worker")).toThrow(
+      /RELAYER_MAX_GAS_PRICE_WEI/
+    );
+    const cfg = loadConfig(
+      { ...env, RELAYER_MAX_GAS_PRICE_WEI: "500000000000" },
+      "worker"
+    );
+    expect(cfg.delivery.maxGasPriceWei).toBe(500000000000n);
+    // Dev workers and non-wallet roles are exempt (0 = ceiling disabled).
+    expect(loadConfig(workerEnv(), "worker").delivery.maxGasPriceWei).toBe(0n);
+    const listenerEnv = workerEnv();
+    delete listenerEnv.RELAYER_USE_DEV_SECRETS;
+    expect(loadConfig(listenerEnv, "listener").delivery.maxGasPriceWei).toBe(
+      0n
+    );
   });
 
   it("migrate role needs only DATABASE_URL", () => {

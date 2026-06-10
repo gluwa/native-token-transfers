@@ -114,8 +114,9 @@ npx tsx devnet/scripts/deploy-special-relayer.ts --chain=chainA
 
 Run the relayer-bot (Postgres + Redis required — see [relayer-bot/README.md](../relayer-bot/README.md));
 point `RELAYER_CHAINS[chainA].specialRelayerAddress` at `$SR`, set
-`RELAYER_DEV_GUARDIAN_KEY` to your `DEV_GUARDIAN_KEY`, then run the `migrate`, `listener`,
-`worker`, and `cron` roles.
+`RELAYER_DEV_GUARDIAN_KEY` to your `DEV_GUARDIAN_KEY` (with `RELAYER_USE_DEV_SECRETS=true` —
+the bot refuses to self-sign VAAs without the explicit dev opt-in), then run the `migrate`,
+`listener`, `worker`, and `cron` roles.
 
 Trigger a transfer through the SpecialRelayer (fund sender WETH first, as above):
 ```bash

@@ -58,6 +58,11 @@ export class RedisStreamsQueue implements Queue {
   private readonly retry: RetryOptions;
   private readonly now: () => number;
   private readonly ready = new Map<ChainId, Promise<void>>();
+  /// Dedicated connection per partition for the blocking XREADGROUP. A blocking command
+  /// parks the WHOLE connection server-side — on a shared socket, every ack/nack/publish
+  /// from other partitions would queue behind an idle partition's BLOCK window (worst case
+  /// ~n_partitions × blockMs of added latency, approaching the visibility timeout).
+  private readonly blocking = new Map<ChainId, Redis>();
 
   constructor(opts: RedisStreamsQueueOptions) {
     this.prefix = opts.prefix ?? "relayer";
@@ -76,6 +81,18 @@ export class RedisStreamsQueue implements Queue {
   private streamKey(partition: ChainId): string {
     return `${this.prefix}:msgs:${partition}`;
   }
+  private blockingClientFor(partition: ChainId): Redis {
+    let c = this.blocking.get(partition);
+    if (!c) {
+      // duplicate() copies the connection options; injected test clients may not have it.
+      c =
+        typeof this.redis.duplicate === "function"
+          ? this.redis.duplicate()
+          : this.redis;
+      this.blocking.set(partition, c);
+    }
+    return c;
+  }
   private retryKey(partition: ChainId): string {
     return `${this.prefix}:retry:${partition}`;
   }
@@ -85,11 +102,15 @@ export class RedisStreamsQueue implements Queue {
     if (!p) {
       p = (async () => {
         try {
+          // Start the group at 0, not $: normally MKSTREAM creates the stream empty so
+          // they're equivalent, but if the group is ever recreated against a stream that
+          // already has entries (group deleted operationally, partial restore), $ would
+          // make every existing entry permanently invisible to the group.
           await this.redis.xgroup(
             "CREATE",
             this.streamKey(partition),
             this.group,
-            "$",
+            "0",
             "MKSTREAM"
           );
         } catch (err) {
@@ -155,8 +176,9 @@ export class RedisStreamsQueue implements Queue {
   ): Promise<Delivery[]> {
     await this.ensureGroup(partition);
     await this.pumpDelayed(partition);
+    const blocking = this.blockingClientFor(partition);
     const res = (await this.run(() =>
-      this.redis.xreadgroup(
+      blocking.xreadgroup(
         "GROUP",
         this.group,
         this.consumer,
@@ -251,6 +273,12 @@ export class RedisStreamsQueue implements Queue {
   }
 
   async close(): Promise<void> {
+    await Promise.all(
+      [...this.blocking.values()]
+        .filter((c) => c !== this.redis)
+        .map((c) => c.quit().catch(() => undefined))
+    );
+    this.blocking.clear();
     await this.redis.quit();
   }
 }

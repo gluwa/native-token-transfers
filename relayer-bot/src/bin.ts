@@ -87,6 +87,16 @@ function makeVaaFetcher(
 ): VaaFetcher {
   const devKey = env["RELAYER_DEV_GUARDIAN_KEY"];
   if (devKey) {
+    // Self-signed VAAs bypass the real guardian network entirely. Gate the dev fetcher
+    // behind the same explicit dev opt-in as dev wallet secrets, so a leaked env var in a
+    // production environment fails loudly at startup instead of silently relaying
+    // dev-signed VAAs.
+    if (!config.useDevSecrets) {
+      throw new Error(
+        "RELAYER_DEV_GUARDIAN_KEY is set but RELAYER_USE_DEV_SECRETS is not true — " +
+          "refusing to self-sign VAAs outside an explicit dev environment"
+      );
+    }
     return new DevGuardianVaaFetcher({
       guardianKey: devKey,
       sourceProviderFor: (id) => {
@@ -106,6 +116,28 @@ function makeVaaFetcher(
     baseUrl: config.wormholescanUrl,
     retry: config.rpcRetry,
   });
+}
+
+/// Heartbeat staleness threshold per role, derived from each role's own loop cadence.
+/// (Previously all roles used 3 × cronIntervalMin, coupling the worker's and listener's
+/// health to an unrelated cron tunable.) Floors keep slow-but-legitimate paths from
+/// flapping the probe.
+function maxHeartbeatAgeMs(
+  role: RelayerRole,
+  config: RelayerBotConfig
+): number {
+  switch (role) {
+    case "listener":
+      // Beats once per successful scan tick.
+      return Math.max(10 * config.scanLoopDelayMs, 60_000);
+    case "worker":
+      // Beats per drain iteration (~blockMs) and per standby retry; a full visibility
+      // window of silence means consumption has genuinely stalled.
+      return Math.max(3 * config.queueVisibilityTimeoutMs, 60_000);
+    default:
+      // cron (migrate exits before the server matters): beats once per tick.
+      return config.cronIntervalMin * 60_000 * 3;
+  }
 }
 
 /// Verify RPC connectivity for every chain before running, so we fail loudly rather than
@@ -128,7 +160,24 @@ async function main(): Promise<void> {
   const config = loadConfig(env, role);
   const logger = createLogger({ role });
 
-  const pool = new Pool({ connectionString: config.databaseUrl });
+  // The worker pins connections for long-lived advisory locks: one per owned partition
+  // (held for the process lifetime) plus one per in-flight message, plus the wallet-reserve
+  // transaction — so the default pool max of 10 deadlocks at ~5 source chains. Size from
+  // the partition count, and fail loudly (instead of waiting forever) if the pool is ever
+  // exhausted anyway.
+  const partitionCount = config.chains.filter(
+    (c) => c.specialRelayerAddress
+  ).length;
+  const pool = new Pool({
+    connectionString: config.databaseUrl,
+    max: Math.max(10, 3 * partitionCount + 4),
+    connectionTimeoutMillis: 30_000,
+  });
+  // pg emits 'error' on the pool for idle-client failures (server restart, LB reaping);
+  // without a listener that's an uncaught 'error' event and the process dies.
+  pool.on("error", (err) => {
+    logger.error("db.idle_client_error", { error: String(err) });
+  });
   const db = createPgDatabase(pool);
 
   try {
@@ -172,7 +221,7 @@ async function main(): Promise<void> {
     port: config.healthPort,
     role,
     logger,
-    maxHeartbeatAgeMs: config.cronIntervalMin * 60_000 * 3,
+    maxHeartbeatAgeMs: maxHeartbeatAgeMs(role, config),
   });
 
   const cleanup: Array<() => Promise<void>> = [

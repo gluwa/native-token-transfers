@@ -87,8 +87,23 @@ class PgLockWalletPool implements WalletPool {
     record: (tx: Tx, lease: { address: string; nonce: number }) => Promise<void>
   ): Promise<Lease> {
     const provider = this.providerFor(chainId);
+    const candidates = shuffled(this.wallets);
+    // Fetch chain nonces BEFORE opening the transaction: the reservation transaction pins
+    // a pool connection (and the wallet advisory lock) for its whole duration, and an RPC
+    // call inside it can hold both for the provider timeout. A slightly stale chain nonce
+    // is safe — the committed rows (dbNext) are the authoritative ratchet; the chain nonce
+    // is only a floor and the gap-fill probe.
+    const chainNonces = new Map<string, number>();
+    await Promise.all(
+      candidates.map(async (w) => {
+        chainNonces.set(
+          w.address,
+          await provider.getTransactionCount(w.address, "pending")
+        );
+      })
+    );
     return this.db.transaction(async (tx) => {
-      for (const wallet of shuffled(this.wallets)) {
+      for (const wallet of candidates) {
         const key = advisoryKey(`${wallet.address}:${chainId}`);
         if (!(await tryAcquireWalletLock(tx, key))) continue;
 
@@ -96,7 +111,7 @@ class PgLockWalletPool implements WalletPool {
           tx,
           wallet.address,
           chainId,
-          provider
+          chainNonces.get(wallet.address) as number
         );
         // Commit the intent (markSubmitting) in the SAME transaction as the reservation.
         await record(tx, { address: wallet.address, nonce });
@@ -127,11 +142,17 @@ class PgLockWalletPool implements WalletPool {
   /// Next nonce = max(highest nonce we've COMMITTED for this wallet+chain + 1, the chain's
   /// pending nonce). Counting `submitting` (not just submitted/confirmed) is what makes the
   /// intent log work: a reserved-but-not-yet-broadcast nonce is never handed out twice.
+  ///
+  /// Gap-fill: when the chain nonce is BELOW dbNext and no live row holds it, that nonce
+  /// was reserved but never reached the chain (its row was terminalized — see the
+  /// nonce-clearing in markConfirmed/markDeadLetter) while a higher nonce was already
+  /// committed. Nothing else will ever send it, and every committed tx above it is
+  /// unminable until it lands — so hand it to this delivery to plug the gap.
   private async reserveNonce(
     tx: Tx,
     address: string,
     chainId: ChainId,
-    provider: Provider
+    chainNonce: number
   ): Promise<number> {
     const res = await tx.query<{ max: string | null }>(
       `SELECT max(nonce_used)::text AS max FROM transactions
@@ -142,7 +163,24 @@ class PgLockWalletPool implements WalletPool {
     const dbMax = res.rows[0]?.max;
     const dbNext =
       dbMax === null || dbMax === undefined ? 0 : Number(dbMax) + 1;
-    const chainNonce = await provider.getTransactionCount(address, "pending");
+    if (chainNonce < dbNext) {
+      const live = await tx.query<{ n: string }>(
+        `SELECT 1 AS n FROM transactions
+           WHERE wallet_used = $1 AND destination_chain_id = $2 AND nonce_used = $3
+             AND status IN ('submitting', 'submitted', 'confirmed')
+           LIMIT 1`,
+        [address, chainId, chainNonce]
+      );
+      if (live.rows.length === 0) {
+        this.logger.warn("wallet.nonce_gap_fill", {
+          wallet_used: address,
+          chain_id: chainId,
+          nonce: chainNonce,
+          db_next: dbNext,
+        });
+        return chainNonce;
+      }
+    }
     return Math.max(dbNext, chainNonce);
   }
 }

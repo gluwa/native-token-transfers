@@ -14,7 +14,11 @@ import {
 import { DEFAULT_RETRY, type RetryOptions, withRetry } from "../retry.js";
 import type { ChainId } from "../types.js";
 import type { VaaId } from "./interfaces.js";
-import { type GuardianSignature, packSignedVaa } from "./vaa.js";
+import {
+  type GuardianSignature,
+  packSignedVaa,
+  parseSignedVaa,
+} from "./vaa.js";
 
 /// Resolves the guardian-signed VAA bytes for a Wormhole message. Returns null when the
 /// VAA is not yet available (the caller decides whether to keep polling vs. time out).
@@ -96,7 +100,24 @@ export class WormholescanVaaFetcher implements VaaFetcher {
       if (!body.vaaBytes) {
         throw new Error("wormholescan response missing vaaBytes");
       }
-      return new Uint8Array(Buffer.from(body.vaaBytes, "base64"));
+      const bytes = new Uint8Array(Buffer.from(body.vaaBytes, "base64"));
+      // Wormholescan is a third-party API — verify the returned VAA is actually the one
+      // we asked for before handing it downstream, so a wrong/poisoned response fails
+      // here with a precise error instead of dead-lettering later on a payload mismatch.
+      const parsed = parseSignedVaa(bytes);
+      if (
+        parsed.emitterChainId !== id.emitterChain ||
+        parsed.emitterAddress.toLowerCase() !==
+          id.emitterAddress.toLowerCase() ||
+        parsed.sequence !== id.sequence
+      ) {
+        throw new Error(
+          `wormholescan returned a different VAA than requested: got ` +
+            `${parsed.emitterChainId}/${parsed.emitterAddress}/${parsed.sequence}, ` +
+            `want ${id.emitterChain}/${id.emitterAddress}/${id.sequence}`
+        );
+      }
+      return bytes;
     };
 
     return withRetry(doFetch, this.retry, this.sleep);

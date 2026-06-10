@@ -49,10 +49,16 @@ export async function correlate(opts: {
   event: ParsedExecutionRequested;
   sourceProvider: Provider;
   coreAddress: string;
+  /// When set, only LogMessagePublished entries whose sender is this address (the source
+  /// chain's WormholeTransceiver) are considered. publishMessage is permissionless, so a
+  /// payload-only match could attribute an attacker's same-payload message (emitted in the
+  /// same tx) and carry the wrong emitter/sequence into the VAA fetch.
+  expectedEmitter?: string;
   retry: RetryOptions;
   sleep?: (ms: number) => Promise<void>;
 }): Promise<DecodedEvent> {
-  const { event, sourceProvider, coreAddress, retry, sleep } = opts;
+  const { event, sourceProvider, coreAddress, expectedEmitter, retry, sleep } =
+    opts;
 
   const receipt = await withRetry(
     () => sourceProvider.getTransactionReceipt(event.txHash),
@@ -65,6 +71,7 @@ export async function correlate(opts: {
 
   const wantPayload = event.requestBytes.toLowerCase();
   const core = coreAddress.toLowerCase();
+  const wantSender = expectedEmitter?.toLowerCase();
 
   let match: { sender: string; sequence: bigint; payload: Hex } | undefined;
   for (const log of receipt.logs) {
@@ -77,11 +84,13 @@ export async function correlate(opts: {
     if (!parsed) continue;
     const payload = (parsed.args["payload"] as string).toLowerCase();
     if (payload !== wantPayload) continue;
+    const sender = parsed.args["sender"] as string;
+    if (wantSender && sender.toLowerCase() !== wantSender) continue;
     // First match wins. A single tx publishing two messages with identical payloads but
-    // different sequences is not expressible by the SpecialRelayer flow (one event ↔ one
-    // published message), so this is unambiguous in practice.
+    // different sequences from the SAME emitter is not expressible by the SpecialRelayer
+    // flow (one event ↔ one published message), so this is unambiguous in practice.
     match = {
-      sender: parsed.args["sender"] as string,
+      sender,
       sequence: parsed.args["sequence"] as bigint,
       payload: parsed.args["payload"] as string,
     };
@@ -91,7 +100,9 @@ export async function correlate(opts: {
   if (!match) {
     throw new CorrelationError(
       `no LogMessagePublished in tx ${event.txHash} matches requestBytes ` +
-        `(core=${coreAddress}); contract invariant requestBytes==payload may have changed`
+        `(core=${coreAddress}` +
+        (wantSender ? `, expected emitter=${expectedEmitter}` : "") +
+        `); contract invariant requestBytes==payload may have changed`
     );
   }
 

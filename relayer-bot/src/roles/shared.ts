@@ -19,5 +19,21 @@ export function recordPayload(rec: TransactionRecord): RelayPayload {
 }
 
 export const noopSleep = (): Promise<void> => Promise.resolve();
-export const realSleep = (ms: number): Promise<void> =>
-  new Promise((r) => setTimeout(r, ms));
+
+/// Sleep that wakes early on abort. The role loops spend most of their lives inside these
+/// sleeps (the cron sleeps minutes between ticks) — a non-abortable sleep turns every
+/// SIGTERM into the 30s force-exit path, skipping cleanup and exiting non-zero.
+export const realSleep = (ms: number, signal?: AbortSignal): Promise<void> =>
+  new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const finish = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    signal?.addEventListener("abort", finish, { once: true });
+  });

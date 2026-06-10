@@ -109,6 +109,10 @@ export class RpcEventSource implements EventSource {
             event: parsed,
             sourceProvider: provider,
             coreAddress: chain.coreBridgeAddress,
+            // The chain's WormholeTransceiver handles both directions: it is the expected
+            // dstAddr when delivering TO this chain and the expected LogMessagePublished
+            // sender when relaying FROM it.
+            expectedEmitter: chain.expectedTransceiver,
             retry: this.retry,
             sleep: this.sleep,
           })

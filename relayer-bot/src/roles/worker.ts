@@ -39,7 +39,7 @@ export interface WorkerDeps {
   partitionRetryMs?: number;
   heartbeat?: () => void;
   now?: () => number;
-  sleep?: (ms: number) => Promise<void>;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   /// Provided in production for the per-message + partition locks (session advisory locks).
   pool?: Pool;
   /// Test seam — run the per-message critical section under a lock. Returns false if the
@@ -49,10 +49,11 @@ export interface WorkerDeps {
     fn: () => Promise<void>
   ) => Promise<boolean>;
   /// Test seam — run the partition consumer loop while holding the partition-ownership
-  /// lock. Returns false if another worker owns the partition.
+  /// lock. Returns false if another worker owns the partition. `fn` receives a `lockLost`
+  /// probe (see withLeaderLock) so the drain loop stands down if the lock session dies.
   runUnderPartitionLock?: (
     partition: ChainId,
-    fn: () => Promise<void>
+    fn: (lockLost?: () => boolean) => Promise<void>
   ) => Promise<boolean>;
 }
 
@@ -108,12 +109,15 @@ async function processDelivery(
     event_tx_hash: m.transaction_hash,
   });
 
-  // Idempotency guard. `confirmed` is terminal → always skip. `submitted` is skipped too,
-  // UNLESS this message is an intentional resubmit (the cron's stuck-retry carries
-  // replace_nonce). A `submitting` row is NEVER skipped — it's a crash recovery that must
-  // resubmit its committed nonce.
+  // Idempotency guard. Terminal states (`confirmed`, `dead_letter`) always skip —
+  // otherwise a lingering replace_nonce message for a dead-lettered row would loop
+  // forever (broadcast → nonce-too-low → defer → nack, never spending budget).
+  // `submitted` is skipped too, UNLESS this message is an intentional resubmit (the
+  // cron's stuck-retry carries replace_nonce). A `submitting` row is NEVER skipped —
+  // it's a crash recovery that must resubmit its committed nonce.
   const skip = (status: string): boolean =>
     status === "confirmed" ||
+    status === "dead_letter" ||
     (status === "submitted" && m.replace_nonce === undefined);
 
   const existing = await TransactionsRepo.findBySourceEvent(
@@ -134,6 +138,21 @@ async function processDelivery(
       messageToInsert(m, config.maxRetries)
     ));
   if (skip(rec.status)) {
+    await queue.ack(delivery);
+    return;
+  }
+
+  // A replace_nonce message is an instruction to rebroadcast ONE SPECIFIC reserved nonce.
+  // If the row no longer holds that nonce (it moved on to a fresh reservation, or the
+  // nonce was cleared on terminalization), the message is a stale duplicate — honoring it
+  // would broadcast an unreserved (wallet, nonce) pair and clobber the newer attempt's
+  // record. Drop it; whatever moved the row on owns it now.
+  if (m.replace_nonce !== undefined && rec.nonceUsed !== m.replace_nonce) {
+    log.info("worker.skip_stale_replace", {
+      replace_nonce: m.replace_nonce,
+      nonce_used: rec.nonceUsed,
+      status: rec.status,
+    });
     await queue.ack(delivery);
     return;
   }
@@ -228,11 +247,28 @@ async function processDelivery(
     return;
   }
 
-  await TransactionsRepo.markSubmitted(db, rec.id, {
+  const recorded = await TransactionsRepo.markSubmitted(db, rec.id, {
     relayTxHash: txHash,
     walletUsed: address,
     nonceUsed: nonce,
   });
+  if (!recorded) {
+    // The row was terminalized concurrently (cron confirmed or dead-lettered it) AFTER we
+    // broadcast. The tx is on the wire but the canonical record doesn't point at it —
+    // surface it loudly for reconciliation instead of logging a false "submitted".
+    log.error("worker.submitted_record_lost", {
+      relay_tx_hash: txHash,
+      wallet_used: address,
+      nonce,
+    });
+    await deps.alerter.alert("tx.submitted_record_lost", {
+      chain_id: m.chain_id,
+      event_tx_hash: m.transaction_hash,
+      relay_tx_hash: txHash,
+    });
+    await queue.ack(delivery);
+    return;
+  }
   log.info("tx.transition", {
     from: rec.status,
     to: "submitted",
@@ -269,7 +305,9 @@ async function handleSubmittingFailure(
 
   if (err instanceof DeferDeliveryError) {
     // nonce-too-low (the prior tx mined → the next prepare's isVAAConsumed confirms it) or
-    // transient. Re-drive (resubmit the same nonce) without spending the budget.
+    // transient. Re-drive (resubmit the same nonce) without spending the budget. Touch the
+    // row so the cron's staleness scan knows it's actively driven, not abandoned.
+    await TransactionsRepo.touch(db, rec.id);
     await queue.nack(delivery, { delayMs: config.vaaPollIntervalMs });
     return;
   }
@@ -322,7 +360,9 @@ async function handleDeliveryFailure(
 
   if (err instanceof AllWalletsBusyError) {
     log.warn("worker.wallets_busy", {});
-    // Back off WITHOUT spending the retry budget.
+    // Back off WITHOUT spending the retry budget. Touch so the cron's lost-message sweep
+    // doesn't republish a row whose message is alive in the delay set.
+    await TransactionsRepo.touch(db, recId);
     await queue.nack(delivery, {
       delayMs: computeBackoffDelayMs(delivery.deliveryAttempt),
     });
@@ -342,7 +382,9 @@ async function handleDeliveryFailure(
       await TransactionsRepo.markDeadLetter(db, recId, reason);
       await queue.deadLetter(delivery, reason);
     } else {
-      // Not a failure — try again soon without spending the retry budget.
+      // Not a failure — try again soon without spending the retry budget. Touch so the
+      // cron knows this row is actively driven (its message lives in the delay set).
+      await TransactionsRepo.touch(db, recId);
       await queue.nack(delivery, { delayMs: config.vaaPollIntervalMs });
     }
     return;
@@ -393,7 +435,8 @@ async function drainPartition(
   deps: WorkerDeps,
   partition: ChainId,
   blockMs: number,
-  signal: AbortSignal
+  signal: AbortSignal,
+  lockLost?: () => boolean
 ): Promise<void> {
   const handle = async (d: Delivery): Promise<void> => {
     try {
@@ -406,15 +449,21 @@ async function drainPartition(
       });
     }
   };
-  while (!signal.aborted) {
+  // Stand down if the partition-lock session died: Postgres freed the lock, so another
+  // worker may already own this partition — continuing would break FIFO with two owners.
+  const lost = (): boolean => lockLost?.() ?? false;
+  while (!signal.aborted && !lost()) {
     for (const d of await deps.queue.reclaimExpired(partition, { max: 1 })) {
       await handle(d);
     }
-    if (signal.aborted) break;
+    if (signal.aborted || lost()) break;
     for (const d of await deps.queue.consume(partition, { max: 1, blockMs })) {
       await handle(d);
     }
     deps.heartbeat?.();
+  }
+  if (lost()) {
+    deps.logger.warn("worker.partition_lock_lost", { chain_id: partition });
   }
 }
 
@@ -437,7 +486,10 @@ export async function runWorker(
 
   const runUnderPartitionLock =
     deps.runUnderPartitionLock ??
-    ((partition: ChainId, fn: () => Promise<void>): Promise<boolean> =>
+    ((
+      partition: ChainId,
+      fn: (lockLost?: () => boolean) => Promise<void>
+    ): Promise<boolean> =>
       deps.pool
         ? withLeaderLock(deps.pool, advisoryKey(`partition:${partition}`), fn)
         : fn().then(() => true));
@@ -447,17 +499,22 @@ export async function runWorker(
       const log = deps.logger.child({ role: "worker", chain_id: partition });
       while (!signal.aborted) {
         let owned = false;
+        let errored = false;
         try {
-          owned = await runUnderPartitionLock(partition, () =>
-            drainPartition(deps, partition, blockMs, signal)
+          owned = await runUnderPartitionLock(partition, (lockLost) =>
+            drainPartition(deps, partition, blockMs, signal, lockLost)
           );
         } catch (err) {
+          errored = true;
           log.error("worker.partition_error", { error: String(err) });
         }
-        if (!owned && !signal.aborted) {
-          // Another worker owns this partition; check back later (for failover).
-          deps.heartbeat?.();
-          await sleep(retryMs);
+        if (!owned || errored) {
+          if (signal.aborted) break;
+          // Standby (another worker owns the partition) is healthy — heartbeat. A thrown
+          // error (e.g. the DB is unreachable) is NOT: skipping the heartbeat lets /health
+          // go stale instead of reporting green while we can't relay anything.
+          if (!errored) deps.heartbeat?.();
+          await sleep(retryMs, signal);
         }
       }
     })

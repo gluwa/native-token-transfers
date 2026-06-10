@@ -137,14 +137,33 @@ export const TransactionsRepo = {
   },
 
   /// → confirmed. Allowed from any non-terminal state (worker found it already on-chain, or
-  /// cron found a receipt).
+  /// cron found a receipt). A row with no relay_tx_hash holds a reserved nonce that was
+  /// never broadcast (e.g. confirmed via isVAAConsumed after someone else delivered) —
+  /// clear it, or the wallet pool's max(nonce_used) scan counts a nonce the chain will
+  /// never see and every later tx sits gapped behind it forever.
   async markConfirmed(db: Queryable, id: string): Promise<boolean> {
     const res = await db.query(
-      `UPDATE transactions SET status = 'confirmed', updated_at = now()
+      `UPDATE transactions
+         SET status = 'confirmed',
+             nonce_used = CASE WHEN relay_tx_hash IS NULL THEN NULL ELSE nonce_used END,
+             updated_at = now()
        WHERE id = $1 AND status IN ('pending', 'submitting', 'submitted', 'failed')`,
       [id]
     );
     return (res.rowCount ?? 0) > 0;
+  },
+
+  /// Liveness heartbeat: bump updated_at WITHOUT changing state. Called by the worker on
+  /// every defer (VAA not observable yet, fee ceiling, wallets busy) so the cron's
+  /// staleness scans read "stale" as "nobody is driving this row" (crash recovery) rather
+  /// than "row is old". Without it, a row deferring through a 10-minute outage gets its
+  /// retry budget burned and dead-lettered by the cron while perfectly healthy.
+  async touch(db: Queryable, id: string): Promise<void> {
+    await db.query(
+      `UPDATE transactions SET updated_at = now()
+       WHERE id = $1 AND status IN ('pending', 'submitting', 'submitted', 'failed')`,
+      [id]
+    );
   },
 
   /// Bump retry_count WITHOUT leaving the submitting state — used when a broadcast of an
@@ -197,8 +216,16 @@ export const TransactionsRepo = {
     // an on-chain receipt while a worker is concurrently resubmitting it (they hold
     // disjoint locks), and the worker's failure path must not turn that success into a
     // dead_letter.
+    //
+    // No relay_tx_hash → the reserved nonce was never broadcast; clear it so the nonce can
+    // be re-issued (see markConfirmed). dead_letter rows are excluded from the wallet
+    // pool's max() scan, but the cleared nonce also lets the gap-fill check in
+    // reserveNonce treat the chain nonce as free.
     const res = await db.query(
-      `UPDATE transactions SET status = 'dead_letter', error_message = $2, updated_at = now()
+      `UPDATE transactions
+         SET status = 'dead_letter', error_message = $2,
+             nonce_used = CASE WHEN relay_tx_hash IS NULL THEN NULL ELSE nonce_used END,
+             updated_at = now()
        WHERE id = $1 AND status NOT IN ('confirmed', 'dead_letter')`,
       [id, errorMessage]
     );

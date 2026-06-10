@@ -23,6 +23,10 @@ function env(): NodeJS.ProcessEnv {
 interface FakeDbOpts {
   lockResults: boolean[]; // per advisory-lock attempt, in order
   dbMax?: string | null;
+  /// Whether a live (submitting/submitted/confirmed) row holds the chain nonce — the
+  /// gap-fill probe. Defaults true: in the normal "dbMax ahead of chain" case the gap
+  /// nonces ARE held by in-flight rows.
+  liveRowAtChainNonce?: boolean;
 }
 function fakeDb(opts: FakeDbOpts): Database {
   let lockIdx = 0;
@@ -36,6 +40,13 @@ function fakeDb(opts: FakeDbOpts): Database {
         return {
           rows: [{ max: opts.dbMax ?? null } as unknown as R],
           rowCount: 1,
+        };
+      }
+      if (sql.includes("nonce_used = $3")) {
+        const live = opts.liveRowAtChainNonce ?? true;
+        return {
+          rows: live ? [{ n: "1" } as unknown as R] : [],
+          rowCount: live ? 1 : 0,
         };
       }
       return { rows: [], rowCount: 0 };
@@ -84,13 +95,25 @@ describe("PgLockWalletPool.reserve", () => {
     expect(recorded).toEqual({ address: lease.address, nonce: 10 });
   });
 
-  it("uses dbMax+1 when ahead of the chain nonce", async () => {
+  it("uses dbMax+1 when ahead of the chain nonce (gap held by live rows)", async () => {
     const pool = await makePool(
-      fakeDb({ lockResults: [true], dbMax: "8" }),
+      fakeDb({ lockResults: [true], dbMax: "8", liveRowAtChainNonce: true }),
       providers(3)
     );
     const lease = await pool.reserve(6, noop);
-    expect(lease.nonce).toBe(9); // max(8+1, 3)
+    expect(lease.nonce).toBe(9); // max(8+1, 3) — nonce 3 belongs to an in-flight row
+  });
+
+  it("fills a nonce gap when no live row holds the chain nonce", async () => {
+    // dbMax 8 but the chain is at 3 and NO live row holds 3: a terminalized row orphaned
+    // that nonce (cleared by markConfirmed/markDeadLetter). Every committed tx above it is
+    // unminable until 3 lands, so the reservation must plug the gap, not extend it.
+    const pool = await makePool(
+      fakeDb({ lockResults: [true], dbMax: "8", liveRowAtChainNonce: false }),
+      providers(3)
+    );
+    const lease = await pool.reserve(6, noop);
+    expect(lease.nonce).toBe(3);
   });
 
   it("starts at the chain nonce when no DB history", async () => {

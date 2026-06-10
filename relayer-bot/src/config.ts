@@ -190,7 +190,10 @@ function loadRpcRetry(env: NodeJS.ProcessEnv): RetryOptions {
   return { maxAttempts, initialDelayMs, maxDelayMs };
 }
 
-function loadDelivery(env: NodeJS.ProcessEnv): DeliveryConfig {
+function loadDelivery(
+  env: NodeJS.ProcessEnv,
+  requireGasCeiling: boolean
+): DeliveryConfig {
   const maxGasPriceRaw = env["RELAYER_MAX_GAS_PRICE_WEI"];
   let maxGasPriceWei = 0n;
   if (maxGasPriceRaw && maxGasPriceRaw.length > 0) {
@@ -202,6 +205,16 @@ function loadDelivery(env: NodeJS.ProcessEnv): DeliveryConfig {
     if (maxGasPriceWei < 0n) {
       throw new Error("RELAYER_MAX_GAS_PRICE_WEI must be >= 0");
     }
+  }
+  // 0 disables the ceiling — acceptable in dev, but a production worker without a fee
+  // ceiling pays whatever the chain asks (× the per-retry bump) during a gas spike until
+  // the wallets drain. Force operators to choose a number.
+  if (requireGasCeiling && maxGasPriceWei <= 0n) {
+    throw new Error(
+      "RELAYER_MAX_GAS_PRICE_WEI must be set (> 0) for the worker role: without a fee " +
+        "ceiling a gas spike can drain the relayer wallets (set RELAYER_USE_DEV_SECRETS=true " +
+        "to opt out in dev)"
+    );
   }
   return {
     gasLimitBufferBps: parseIntInRange(
@@ -352,7 +365,7 @@ export function loadConfig(
     healthHost: env["RELAYER_HEALTH_HOST"] ?? "127.0.0.1",
     healthPort: parseIntInRange(env, "RELAYER_HEALTH_PORT", "8080", 0, 0xffff),
     rpcRetry: loadRpcRetry(env),
-    delivery: loadDelivery(env),
+    delivery: loadDelivery(env, needs.wallets && !useDevSecrets),
   };
 }
 

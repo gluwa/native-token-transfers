@@ -62,7 +62,7 @@ All config is via environment variables. The role is set with `--role=<role>` (o
 | `AZURE_KEY_VAULT_URL` | yes² | | Key Vault URL. Not required if `RELAYER_USE_DEV_SECRETS=true`. |
 | `RELAYER_USE_DEV_SECRETS` | no | `false` | Read keys from `RELAYER_WALLET_<name>` env vars (dev/tests only). |
 | `WORMHOLESCAN_URL` | no | `https://api.wormholescan.io` | VAA source (use the testnet host on testnet). |
-| `RELAYER_DEV_GUARDIAN_KEY` | no | | If set, self-sign VAAs with this dev guardian key instead of Wormholescan. |
+| `RELAYER_DEV_GUARDIAN_KEY` | no | | If set, self-sign VAAs with this dev guardian key instead of Wormholescan. Requires `RELAYER_USE_DEV_SECRETS=true` (refused otherwise). |
 | `SLACK_WEBHOOK_URL` | no | | Slack incoming webhook for alerts (alerts log-only if unset). |
 | `SCAN_BLOCK_RANGE` | no | `200` | Max blocks scanned per `getLogs` range. (Legacy alias: `SCAN_INTERVAL_MS` — a block count despite the name.) |
 | `RELAYER_SCAN_LOOP_DELAY_MS` | no | `2000` | Sleep between scan iterations. |
@@ -72,7 +72,7 @@ All config is via environment variables. The role is set with `--role=<role>` (o
 | `RELAYER_RETRY_ADDITIONAL_GAS_LIMIT` | no | `10` | Extra gas-limit percent applied on retries. |
 | `RELAYER_GAS_LIMIT_BUFFER_BPS` | no | `1000` | Gas-limit buffer over the signed limit (bps). |
 | `RELAYER_GAS_PRICE_BUMP_BPS` | no | `1500` | Per-retry fee bump (bps). |
-| `RELAYER_MAX_GAS_PRICE_WEI` | no | `0` (off) | Fee ceiling; above it, delivery defers. |
+| `RELAYER_MAX_GAS_PRICE_WEI` | yes² | `0` (off) | Fee ceiling; above it, delivery defers. Required (> 0) for a production worker; only dev workers (`RELAYER_USE_DEV_SECRETS=true`) may leave it off. |
 | `SUBMITTED_TIMEOUT_MIN` | no | `5` | Minutes before the cron re-checks a submitted tx. |
 | `CRON_INTERVAL_MIN` | no | `2` | Cron run interval. |
 | `RELAYER_VAA_TIMEOUT_MS` | no | `1800000` | Give up fetching a VAA after this, then dead-letter. |
