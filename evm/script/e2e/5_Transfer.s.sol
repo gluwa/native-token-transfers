@@ -66,9 +66,8 @@ contract Transfer is Script, E2EConfig {
         vm.stopBroadcast();
 
         console2.log("Transfer broadcast complete.");
-        console2.log("Next: node script/e2e/fetch_e2e_vaa.cjs <TX_HASH>");
         console2.log(
-            "Expected VAA emitter chain (must match E2E_SRC_WORMHOLE_CHAIN_ID):",
+            "Fetch the VAA for this tx; emitter chain must match E2E_SRC_WORMHOLE_CHAIN_ID:",
             src.wormholeChainId
         );
         console2.log("Then run 6_ReceiveMessage with E2E_SIGNED_VAA set.");

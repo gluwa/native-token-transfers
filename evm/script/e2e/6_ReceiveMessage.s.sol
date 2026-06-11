@@ -15,8 +15,8 @@ import "./helpers/E2EConfig.sol";
 ///   E2E_SIGNED_VAA=0x...                    — guardian-signed VAA hex
 ///   E2E_DST_WORMHOLE_TRANSCEIVER=0x...      — from step 2
 ///
-/// After step 5, fetch the VAA with `node script/e2e/fetch_e2e_vaa.cjs <TX_HASH>`
-/// (selects the VAA whose emitter chain equals `E2E_SRC_WORMHOLE_CHAIN_ID`).
+/// After step 5, set `E2E_SIGNED_VAA` to the guardian-signed VAA whose emitter chain
+/// equals `E2E_SRC_WORMHOLE_CHAIN_ID`.
 contract ReceiveMessage is Script, E2EConfig {
     function run() public {
         ChainDeployment memory src = readChainDeployment("src");

@@ -67,7 +67,7 @@ contract DeployDstContracts is Script, DeployWormholeNttBase, E2EConfig {
             manager, transceiver, params.outboundLimit, params.shouldSkipRatelimiter
         );
 
-        persistDstDeployment(
+        logDstDeployment(
             ChainDeployment({
                 wormholeChainId: dstChainId,
                 token: token,

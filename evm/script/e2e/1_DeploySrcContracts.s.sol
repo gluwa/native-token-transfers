@@ -97,7 +97,7 @@ contract DeploySrcContracts is Script, DeployWormholeNttBase, E2EConfig {
             manager, transceiver, params.outboundLimit, params.shouldSkipRatelimiter
         );
 
-        persistSrcDeployment(
+        logSrcDeployment(
             ChainDeployment({
                 wormholeChainId: srcChainId,
                 token: token,
