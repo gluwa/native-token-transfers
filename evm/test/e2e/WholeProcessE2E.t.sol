@@ -50,7 +50,9 @@ contract WholeProcessE2ETest is Test {
     address userB = address(0x456);
     address wormholeRelayerAddr = address(0x80aC94316391752A193C1c47E27D382b507c93F3);
 
-    event ReceivedMessage(bytes32 hash, uint16 emitterChainId, bytes32 emitterAddress, uint64 sequence);
+    event ReceivedMessage(
+        bytes32 hash, uint16 emitterChainId, bytes32 emitterAddress, uint64 sequence
+    );
 
     function setUp() public {
         vm.createSelectFork("https://bsc-testnet-rpc.publicnode.com");
@@ -59,12 +61,13 @@ contract WholeProcessE2ETest is Test {
         quoter = new PenguinBridgeExecutionQuoter();
         quoter.setOracleService(address(this));
         quoter.setPayeeAddress(bytes32(uint256(uint160(payee))));
-        IPenguinBridgeExecutionQuoter.PricingData memory defaultPrice = IPenguinBridgeExecutionQuoter.PricingData({
-            dstPrice: uint64(1_000 * 10 ** 10),
-            dstGasPrice: 20 gwei,
-            priceBuffer: 1_000, // 10%
-            baseFee: 0.001 ether
-        });
+        IPenguinBridgeExecutionQuoter.PricingData memory defaultPrice =
+            IPenguinBridgeExecutionQuoter.PricingData({
+                dstPrice: uint64(1_000 * 10 ** 10),
+                dstGasPrice: 20 gwei,
+                priceBuffer: 1_000, // 10%
+                baseFee: 0.001 ether
+            });
         quoter.priceUpdate(SRC_PRICE, CHAIN_ID_2, defaultPrice);
 
         quoter.addQuoter(vm.addr(QUOTER_PRIVATE_KEY));
@@ -91,15 +94,21 @@ contract WholeProcessE2ETest is Test {
         (bytes memory signedQuote, uint256 requiredPayment) =
             _simulateQuoterService(CHAIN_ID_2, dstTransceiver, 0, GAS_LIMIT);
 
-        (bytes memory instructions, TransceiverStructs.TransceiverInstruction memory quoteInstruction) =
-            _encodeSpecialRelayInstructions(signedQuote);
+        (
+            bytes memory instructions,
+            TransceiverStructs.TransceiverInstruction memory quoteInstruction
+        ) = _encodeSpecialRelayInstructions(signedQuote);
         uint256 deliveryFee =
             wormholeTransceiverChain1.quoteDeliveryPrice(CHAIN_ID_2, quoteInstruction);
 
         assertEq(
             requiredPayment,
             quoter.requestQuote(
-                CHAIN_ID_2, dstTransceiver, address(0), abi.encode(uint256(0)), abi.encode(GAS_LIMIT)
+                CHAIN_ID_2,
+                dstTransceiver,
+                address(0),
+                abi.encode(uint256(0)),
+                abi.encode(GAS_LIMIT)
             ),
             "signed payment must match on-chain quote"
         );
@@ -120,7 +129,11 @@ contract WholeProcessE2ETest is Test {
         );
         vm.stopPrank();
 
-        assertEq(payee.balance, payeeBalanceBefore + requiredPayment, "payee receives quoted execution fee");
+        assertEq(
+            payee.balance,
+            payeeBalanceBefore + requiredPayment,
+            "payee receives quoted execution fee"
+        );
 
         Vm.Log[] memory wormholeLogs = guardian.fetchWormholeMessageFromLog(vm.getRecordedLogs());
         assertEq(wormholeLogs.length, 1, "transfer should publish one wormhole message");
@@ -136,7 +149,11 @@ contract WholeProcessE2ETest is Test {
 
         assertEq(token2.totalSupply(), supplyBefore + sendingAmount, "destination supply increases");
         assertEq(token2.balanceOf(userB), sendingAmount, "recipient receives minted tokens");
-        assertEq(token1.balanceOf(address(nttManagerChain1)), sendingAmount, "source manager locks tokens");
+        assertEq(
+            token1.balanceOf(address(nttManagerChain1)),
+            sendingAmount,
+            "source manager locks tokens"
+        );
     }
 
     function test_e2e_quoterServiceSignedQuoteAcceptedBySpecialRelayer() public {
@@ -182,16 +199,24 @@ contract WholeProcessE2ETest is Test {
     }
 
     /// @dev read on-chain price, then sign PQ01 for SpecialRelayer.
-    function _simulateQuoterService(uint16 dstChain, bytes32 dstAddr, uint256 msgValue, uint256 gasLimit)
-        internal
-        returns (bytes memory signedQuote, uint256 requiredPayment)
-    {
+    function _simulateQuoterService(
+        uint16 dstChain,
+        bytes32 dstAddr,
+        uint256 msgValue,
+        uint256 gasLimit
+    ) internal returns (bytes memory signedQuote, uint256 requiredPayment) {
         (requiredPayment,,) = quoter.requestExecutionQuote(
             dstChain, dstAddr, address(0), abi.encode(msgValue), abi.encode(gasLimit)
         );
 
         signedQuote = _signQuote(
-            vm.addr(QUOTER_PRIVATE_KEY), payee, CHAIN_ID_1, dstChain, requiredPayment, gasLimit, 1 hours
+            vm.addr(QUOTER_PRIVATE_KEY),
+            payee,
+            CHAIN_ID_1,
+            dstChain,
+            requiredPayment,
+            gasLimit,
+            1 hours
         );
     }
 
@@ -214,9 +239,8 @@ contract WholeProcessE2ETest is Test {
             FAST_CONSISTENCY_LEVEL,
             GAS_LIMIT
         );
-        wormholeTransceiverChain1 = WormholeTransceiver(
-            address(new ERC1967Proxy(address(implementationTransceiver), ""))
-        );
+        wormholeTransceiverChain1 =
+            WormholeTransceiver(address(new ERC1967Proxy(address(implementationTransceiver), "")));
         wormholeTransceiverChain1.initialize();
 
         nttManagerChain1.setTransceiver(address(wormholeTransceiverChain1));
@@ -244,9 +268,8 @@ contract WholeProcessE2ETest is Test {
             FAST_CONSISTENCY_LEVEL,
             GAS_LIMIT
         );
-        wormholeTransceiverChain2 = WormholeTransceiver(
-            address(new ERC1967Proxy(address(implementationTransceiver), ""))
-        );
+        wormholeTransceiverChain2 =
+            WormholeTransceiver(address(new ERC1967Proxy(address(implementationTransceiver), "")));
         wormholeTransceiverChain2.initialize();
 
         nttManagerChain2.setTransceiver(address(wormholeTransceiverChain2));
@@ -277,7 +300,9 @@ contract WholeProcessE2ETest is Test {
         vm.chainId(CHAIN_ID_1);
     }
 
-    function _encodeSpecialRelayInstructions(bytes memory signedQuote)
+    function _encodeSpecialRelayInstructions(
+        bytes memory signedQuote
+    )
         internal
         view
         returns (bytes memory encoded, TransceiverStructs.TransceiverInstruction memory instruction)
@@ -289,7 +314,9 @@ contract WholeProcessE2ETest is Test {
 
         instruction = TransceiverStructs.TransceiverInstruction({
             index: 0,
-            payload: wormholeTransceiverChain1.encodeWormholeTransceiverInstruction(wormholeInstruction)
+            payload: wormholeTransceiverChain1.encodeWormholeTransceiverInstruction(
+                wormholeInstruction
+            )
         });
 
         TransceiverStructs.TransceiverInstruction[] memory instructions =

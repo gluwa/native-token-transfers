@@ -42,11 +42,13 @@ contract Transfer is Script, E2EConfig {
         uint256 amount = vm.envOr("E2E_TRANSFER_AMOUNT", uint256(5 ether));
 
         IWormholeTransceiver transceiver = IWormholeTransceiver(src.wormholeTransceiver);
-        (bytes memory instructions, TransceiverStructs.TransceiverInstruction memory quoteInstruction) =
-            encodeSpecialRelayInstructions(transceiver, art.signedQuoteBytes);
+        (
+            bytes memory instructions,
+            TransceiverStructs.TransceiverInstruction memory quoteInstruction
+        ) = encodeSpecialRelayInstructions(transceiver, art.signedQuoteBytes);
 
-        uint256 deliveryFee =
-            ITransceiver(address(transceiver)).quoteDeliveryPrice(dst.wormholeChainId, quoteInstruction);
+        uint256 deliveryFee = ITransceiver(address(transceiver))
+            .quoteDeliveryPrice(dst.wormholeChainId, quoteInstruction);
         console2.log("Delivery fee (wei):", deliveryFee);
 
         vm.startBroadcast(senderKey);
@@ -65,7 +67,10 @@ contract Transfer is Script, E2EConfig {
 
         console2.log("Transfer broadcast complete.");
         console2.log("Next: node script/e2e/fetch_e2e_vaa.cjs <TX_HASH>");
-        console2.log("Expected VAA emitter chain (must match E2E_SRC_WORMHOLE_CHAIN_ID):", src.wormholeChainId);
+        console2.log(
+            "Expected VAA emitter chain (must match E2E_SRC_WORMHOLE_CHAIN_ID):",
+            src.wormholeChainId
+        );
         console2.log("Then run 6_ReceiveMessage with E2E_SIGNED_VAA set.");
     }
 }

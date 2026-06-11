@@ -5,7 +5,9 @@ import {console2} from "forge-std/Script.sol";
 
 import {INttManager} from "../../src/interfaces/INttManager.sol";
 import {IWormholeTransceiver} from "../../src/interfaces/IWormholeTransceiver.sol";
-import {WormholeTransceiverState} from "../../src/Transceiver/WormholeTransceiver/WormholeTransceiverState.sol";
+import {
+    WormholeTransceiverState
+} from "../../src/Transceiver/WormholeTransceiver/WormholeTransceiverState.sol";
 import "wormhole-solidity-sdk/Utils.sol";
 
 import "./helpers/E2EConfig.sol";
@@ -23,7 +25,10 @@ contract ConfigurePeers is Script, E2EConfig {
         uint16 thisChain = wormholeChainIdFromEnv();
 
         require(src.wormholeChainId != 0 && dst.wormholeChainId != 0, "Run deploy scripts first");
-        require(thisChain == src.wormholeChainId || thisChain == dst.wormholeChainId, "Chain id mismatch");
+        require(
+            thisChain == src.wormholeChainId || thisChain == dst.wormholeChainId,
+            "Chain id mismatch"
+        );
 
         if (thisChain == src.wormholeChainId) {
             assertReleaseChainIdMatches(src.wormholeChainId);
@@ -44,15 +49,17 @@ contract ConfigurePeers is Script, E2EConfig {
         vm.stopBroadcast();
     }
 
-    function _configureSource(ChainDeployment memory src, ChainDeployment memory dst) internal {
+    function _configureSource(
+        ChainDeployment memory src,
+        ChainDeployment memory dst
+    ) internal {
         INttManager manager = INttManager(src.nttManager);
         IWormholeTransceiver transceiver = IWormholeTransceiver(src.wormholeTransceiver);
 
         manager.setPeer(dst.wormholeChainId, toWormholeFormat(dst.nttManager), 18, type(uint64).max);
         console2.log("Source NttManager peer set for chain", dst.wormholeChainId);
 
-        uint256 messageFee =
-            WormholeTransceiverState(address(transceiver)).wormhole().messageFee();
+        uint256 messageFee = WormholeTransceiverState(address(transceiver)).wormhole().messageFee();
         transceiver.setWormholePeer{value: messageFee}(
             dst.wormholeChainId, toWormholeFormat(dst.wormholeTransceiver)
         );
@@ -65,15 +72,17 @@ contract ConfigurePeers is Script, E2EConfig {
         manager.setInboundLimit(type(uint64).max, dst.wormholeChainId);
     }
 
-    function _configureDestination(ChainDeployment memory src, ChainDeployment memory dst) internal {
+    function _configureDestination(
+        ChainDeployment memory src,
+        ChainDeployment memory dst
+    ) internal {
         INttManager manager = INttManager(dst.nttManager);
         IWormholeTransceiver transceiver = IWormholeTransceiver(dst.wormholeTransceiver);
 
         manager.setPeer(src.wormholeChainId, toWormholeFormat(src.nttManager), 18, type(uint64).max);
         console2.log("Destination NttManager peer set for chain", src.wormholeChainId);
 
-        uint256 messageFee =
-            WormholeTransceiverState(address(transceiver)).wormhole().messageFee();
+        uint256 messageFee = WormholeTransceiverState(address(transceiver)).wormhole().messageFee();
         transceiver.setWormholePeer{value: messageFee}(
             src.wormholeChainId, toWormholeFormat(src.wormholeTransceiver)
         );

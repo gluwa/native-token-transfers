@@ -4,7 +4,9 @@ pragma solidity >=0.8.8 <0.9.0;
 import {console2} from "forge-std/Script.sol";
 
 import {DeployWormholeNttBase} from "../helpers/DeployWormholeNttBase.sol";
-import {PenguinBridgeExecutionQuoter} from "../../src/SpecialRelayer/PenguinBridgeExecutionQuoter.sol";
+import {
+    PenguinBridgeExecutionQuoter
+} from "../../src/SpecialRelayer/PenguinBridgeExecutionQuoter.sol";
 import {SpecialRelayer} from "../../src/SpecialRelayer/SpecialRelayer.sol";
 import {DummyToken} from "../../src/mocks/DummyToken.sol";
 import {IManagerBase} from "../../src/interfaces/IManagerBase.sol";
@@ -45,7 +47,10 @@ contract DeploySrcContracts is Script, DeployWormholeNttBase, E2EConfig {
 
         address token = vm.envOr("RELEASE_TOKEN_ADDRESS", address(0));
         if (token == address(0)) {
-            require(vm.envOr("E2E_DEPLOY_MOCK_TOKEN", false), "Set RELEASE_TOKEN_ADDRESS or E2E_DEPLOY_MOCK_TOKEN=true");
+            require(
+                vm.envOr("E2E_DEPLOY_MOCK_TOKEN", false),
+                "Set RELEASE_TOKEN_ADDRESS or E2E_DEPLOY_MOCK_TOKEN=true"
+            );
             token = address(new DummyToken());
         }
         console2.log("Token:", token);
@@ -88,7 +93,9 @@ contract DeploySrcContracts is Script, DeployWormholeNttBase, E2EConfig {
 
         address manager = deployNttManager(params, vm.envOr("MANAGER_VARIANT", string("standard")));
         address transceiver = deployWormholeTransceiver(params, manager);
-        configureNttManager(manager, transceiver, params.outboundLimit, params.shouldSkipRatelimiter);
+        configureNttManager(
+            manager, transceiver, params.outboundLimit, params.shouldSkipRatelimiter
+        );
 
         persistSrcDeployment(
             ChainDeployment({
@@ -104,14 +111,21 @@ contract DeploySrcContracts is Script, DeployWormholeNttBase, E2EConfig {
         vm.stopBroadcast();
     }
 
-    function _mockTokenDecimalsIfNeeded(address token, uint8 decimals) internal {
+    function _mockTokenDecimalsIfNeeded(
+        address token,
+        uint8 decimals
+    ) internal {
         (bool success,) = token.staticcall(abi.encodeWithSignature("decimals()"));
         if (!success) {
-            vm.mockCall(token, abi.encodeWithSelector(ERC20.decimals.selector), abi.encode(decimals));
+            vm.mockCall(
+                token, abi.encodeWithSelector(ERC20.decimals.selector), abi.encode(decimals)
+            );
         }
     }
 
-    function _tokenScale(uint8 decimals) internal pure returns (uint256) {
+    function _tokenScale(
+        uint8 decimals
+    ) internal pure returns (uint256) {
         return decimals > TRIMMED_DECIMALS ? uint256(10 ** (decimals - TRIMMED_DECIMALS)) : 1;
     }
 }

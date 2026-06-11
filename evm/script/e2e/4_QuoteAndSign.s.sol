@@ -3,7 +3,9 @@ pragma solidity >=0.8.8 <0.9.0;
 
 import {console2} from "forge-std/Script.sol";
 
-import {PenguinBridgeExecutionQuoter} from "../../src/SpecialRelayer/PenguinBridgeExecutionQuoter.sol";
+import {
+    PenguinBridgeExecutionQuoter
+} from "../../src/SpecialRelayer/PenguinBridgeExecutionQuoter.sol";
 import "wormhole-solidity-sdk/Utils.sol";
 
 import "./helpers/E2EConfig.sol";
@@ -41,7 +43,11 @@ contract QuoteAndSign is Script, E2EConfig {
         PenguinBridgeExecutionQuoter quoter = PenguinBridgeExecutionQuoter(src.quoter);
 
         (uint256 requiredPayment,,) = quoter.requestExecutionQuote(
-            dst.wormholeChainId, dstTransceiver, address(0), abi.encode(uint256(0)), abi.encode(gasLimit)
+            dst.wormholeChainId,
+            dstTransceiver,
+            address(0),
+            abi.encode(uint256(0)),
+            abi.encode(gasLimit)
         );
 
         bytes memory signedQuote = signExecutionQuote(

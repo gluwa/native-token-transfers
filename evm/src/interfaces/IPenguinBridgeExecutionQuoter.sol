@@ -39,5 +39,7 @@ interface IPenguinBridgeExecutionQuoter {
         bytes calldata relayInstructions
     ) external returns (uint256, bytes32, bytes32);
 
-    function isAuthorizedQuoter(address quoter) external view returns (bool);
+    function isAuthorizedQuoter(
+        address quoter
+    ) external view returns (bool);
 }
