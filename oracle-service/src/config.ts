@@ -34,10 +34,13 @@ export interface OracleServiceConfig {
   rpcUrl: string;
   /// Address of PenguinBridgeExecutionQuoter on the source chain.
   contractAddress: string;
-  /// Active pricing mode.
-  mode: PricingMode;
-  /// CoinGecko id of the token priced into `sourcePrice` for the active mode.
-  sourceTokenId: string;
+  /// Pricing mode used when the contract does not expose `pricingMode()` (pre-SMC-1681
+  /// deployments). When the getter exists, the contract's mode always wins.
+  fallbackMode: PricingMode | undefined;
+  /// CoinGecko id priced into `sourcePrice`, per mode. Only the active mode's id is
+  /// needed — e.g. at launch ATTEST has no USD market, so only the penguinswap id
+  /// (CTC) exists.
+  sourceTokenIds: Partial<Record<PricingMode, string>>;
   /// CoinGecko REST base URL.
   coingeckoBaseUrl: string;
   /// Optional CoinGecko API key (sent as x-cg-demo-api-key / x-cg-pro-api-key).
@@ -46,6 +49,9 @@ export interface OracleServiceConfig {
   pushIntervalMs: number;
   /// Rolling window over which prices are time-weighted, in milliseconds.
   twapWindowMs: number;
+  /// How long to wait for a batchPriceUpdate receipt before treating the tick as
+  /// failed, in milliseconds. Bounds a stuck transaction so the push loop never hangs.
+  txWaitTimeoutMs: number;
   /// Destination chains to price.
   chains: ChainConfig[];
   /// File touched after each successful push, for the container healthcheck.
@@ -76,9 +82,15 @@ function parseIntEnv(
   fallback: number,
   min: number
 ): number {
-  const value = Number(env[name] ?? String(fallback));
+  const raw = env[name];
+  // Empty/whitespace counts as unset (e.g. compose interpolating an undefined var),
+  // not as 0 — Number("") === 0 would silently disable interval/window settings.
+  if (raw === undefined || raw.trim() === "") {
+    return fallback;
+  }
+  const value = Number(raw.trim());
   if (!Number.isInteger(value) || value < min) {
-    throw new Error(`${name} must be an integer >= ${min}, got ${env[name]}`);
+    throw new Error(`${name} must be an integer >= ${min}, got ${raw}`);
   }
   return value;
 }
@@ -156,14 +168,36 @@ export function loadConfig(
   env: NodeJS.ProcessEnv = process.env
 ): OracleServiceConfig {
   const wallet = new Wallet(required(env, "ORACLE_PRIVATE_KEY"));
-  const mode = parseMode(required(env, "ORACLE_PRICING_MODE"));
-  const sourceTokenId =
-    mode === "twap"
-      ? required(env, "ORACLE_SOURCE_TOKEN_ID_TWAP")
-      : required(env, "ORACLE_SOURCE_TOKEN_ID_PENGUINSWAP");
+
+  const rawMode = env["ORACLE_PRICING_MODE"];
+  const fallbackMode =
+    rawMode === undefined || rawMode.trim() === ""
+      ? undefined
+      : parseMode(rawMode.trim());
+  const sourceTokenIds: Partial<Record<PricingMode, string>> = {};
+  const twapId = env["ORACLE_SOURCE_TOKEN_ID_TWAP"];
+  if (twapId) sourceTokenIds.twap = twapId;
+  const penguinswapId = env["ORACLE_SOURCE_TOKEN_ID_PENGUINSWAP"];
+  if (penguinswapId) sourceTokenIds.penguinswap = penguinswapId;
+  if (!sourceTokenIds.twap && !sourceTokenIds.penguinswap) {
+    throw new Error(
+      "at least one of ORACLE_SOURCE_TOKEN_ID_TWAP / ORACLE_SOURCE_TOKEN_ID_PENGUINSWAP is required"
+    );
+  }
+  if (fallbackMode && !sourceTokenIds[fallbackMode]) {
+    throw new Error(
+      `ORACLE_SOURCE_TOKEN_ID_${fallbackMode.toUpperCase()} is required when ORACLE_PRICING_MODE=${fallbackMode}`
+    );
+  }
 
   const pushIntervalMs = parseIntEnv(env, "ORACLE_PUSH_INTERVAL_MS", 60_000, 1);
   const twapWindowMs = parseIntEnv(env, "ORACLE_TWAP_WINDOW_MS", 300_000, 0);
+  const txWaitTimeoutMs = parseIntEnv(
+    env,
+    "ORACLE_TX_WAIT_TIMEOUT_MS",
+    120_000,
+    1
+  );
 
   const maxAttempts = parseIntEnv(env, "ORACLE_RPC_MAX_ATTEMPTS", 3, 1);
   const initialDelayMs = parseIntEnv(env, "ORACLE_RPC_INITIAL_DELAY_MS", 200, 0);
@@ -179,13 +213,14 @@ export function loadConfig(
     oracleAddress: getAddress(wallet.address),
     rpcUrl: required(env, "ORACLE_RPC_URL"),
     contractAddress: getAddress(required(env, "ORACLE_CONTRACT_ADDRESS")),
-    mode,
-    sourceTokenId,
+    fallbackMode,
+    sourceTokenIds,
     coingeckoBaseUrl:
       env["ORACLE_COINGECKO_BASE_URL"] ?? "https://api.coingecko.com/api/v3",
     coingeckoApiKey: env["ORACLE_COINGECKO_API_KEY"] || undefined,
     pushIntervalMs,
     twapWindowMs,
+    txWaitTimeoutMs,
     chains: parseChains(required(env, "ORACLE_CHAINS")),
     heartbeatFile: env["ORACLE_HEARTBEAT_FILE"] || undefined,
     retry: { maxAttempts, initialDelayMs, maxDelayMs },

@@ -7,8 +7,13 @@ import {
   getAddress,
 } from "ethers";
 
-import type { ChainConfig } from "./config.js";
-import { DEFAULT_RETRY, type RetryOptions, withRetry } from "./retry.js";
+import type { ChainConfig, PricingMode } from "./config.js";
+import {
+  DEFAULT_RETRY,
+  type RetryOptions,
+  isTransientRpcError,
+  withRetry,
+} from "./retry.js";
 
 /// Mirrors PenguinBridgeExecutionQuoter.PricingData. All fields are uint64.
 export interface PricingData {
@@ -28,6 +33,11 @@ export interface ChainPriceUpdate {
 export interface OracleWriter {
   /// Verify the signer is the contract's registered oracleService.
   assertAuthorized(oracleAddress: string): Promise<void>;
+  /// Read the contract's active pricing mode (the SMC-1681 `pricingMode()` getter,
+  /// 0 = twap, 1 = penguinswap). Returns undefined when the deployed contract predates
+  /// the getter, so callers fall back to the configured mode. Throws on transient RPC
+  /// failure (after retry) so a tick is skipped rather than priced under a guessed mode.
+  pricingMode(): Promise<PricingMode | undefined>;
   /// Push the source price and per-chain pricing in one batchPriceUpdate tx. Returns
   /// the transaction hash. NOT internally retried — a transient send failure skips the
   /// tick and the next interval overwrites prices anyway, so we never risk a double
@@ -46,6 +56,7 @@ export interface GasPriceReader {
 /// IPenguinBridgeExecutionQuoter.sol / PenguinBridgeExecutionQuoter.sol.
 export const QUOTER_WRITE_ABI = [
   "function oracleService() view returns (address)",
+  "function pricingMode() view returns (uint8)",
   "function batchPriceUpdate(uint64 newSourcePrice, uint16[] chainIds, tuple(uint64 dstPrice, uint64 dstGasPrice, uint64 priceBuffer, uint64 baseFee)[] prices)",
 ];
 
@@ -68,6 +79,8 @@ export interface RpcOracleWriterOptions {
   contractAddress: string;
   signingKey: SigningKey;
   retry?: Partial<RetryOptions>;
+  /// Receipt-wait ceiling for pushPrices, in ms. Defaults to 120s.
+  txWaitTimeoutMs?: number;
   sleep?: (ms: number) => Promise<void>;
   /// Treat the network as static (skip chainId auto-detection) — for tests against
   /// mock RPC servers.
@@ -79,6 +92,7 @@ export class RpcOracleWriter implements OracleWriter {
   private readonly wallet: Wallet;
   private readonly contract: Contract;
   private readonly retry: RetryOptions;
+  private readonly txWaitTimeoutMs: number;
   private readonly sleep: ((ms: number) => Promise<void>) | undefined;
 
   constructor(opts: RpcOracleWriterOptions) {
@@ -94,6 +108,7 @@ export class RpcOracleWriter implements OracleWriter {
       this.wallet
     );
     this.retry = { ...DEFAULT_RETRY, ...(opts.retry ?? {}) };
+    this.txWaitTimeoutMs = opts.txWaitTimeoutMs ?? 120_000;
     this.sleep = opts.sleep;
   }
 
@@ -117,6 +132,25 @@ export class RpcOracleWriter implements OracleWriter {
     }
   }
 
+  async pricingMode(): Promise<PricingMode | undefined> {
+    let raw: bigint;
+    try {
+      raw = (await withRetry(
+        () => this.contract["pricingMode"]!() as Promise<bigint>,
+        this.retry,
+        this.sleep
+      )) as bigint;
+    } catch (err) {
+      if (isTransientRpcError(err)) throw err;
+      // CALL_EXCEPTION / BAD_DATA — the deployed contract predates the SMC-1681
+      // getter; the caller falls back to the configured mode.
+      return undefined;
+    }
+    if (raw === 0n) return "twap";
+    if (raw === 1n) return "penguinswap";
+    throw new Error(`contract returned unknown pricingMode ${raw}`);
+  }
+
   async pushPrices(
     sourcePrice: bigint,
     updates: ChainPriceUpdate[]
@@ -127,8 +161,14 @@ export class RpcOracleWriter implements OracleWriter {
       sourcePrice,
       chainIds,
       prices
-    )) as { hash: string; wait: () => Promise<unknown> };
-    await tx.wait();
+    )) as {
+      hash: string;
+      wait: (confirms?: number, timeout?: number) => Promise<unknown>;
+    };
+    // Bounded wait: a stuck transaction (underpriced, source chain stalled) rejects
+    // with code TIMEOUT instead of hanging the push loop forever; the tick is logged
+    // as skipped and the next interval re-prices with a fresh nonce.
+    await tx.wait(1, this.txWaitTimeoutMs);
     return tx.hash;
   }
 }

@@ -125,8 +125,10 @@ interface Sample {
 
 /// Maintains a rolling, time-weighted average price per coin id. Each `record` stamps
 /// the sample with the current clock and evicts samples older than `windowMs`; `average`
-/// weights each sample by the time until the next sample (or until now for the latest).
-/// This is the "TWAP pricing data" shared by both modes.
+/// weights each sample by the interval it closes (time since the previous sample), so
+/// the freshest fetch immediately carries the most recent interval's weight rather than
+/// waiting a full tick to influence the push. This is the "TWAP pricing data" shared by
+/// both modes.
 export class TwapAggregator {
   private readonly samples = new Map<string, Sample[]>();
 
@@ -148,9 +150,10 @@ export class TwapAggregator {
     this.samples.set(id, trimmed);
   }
 
-  /// Time-weighted average over the retained window. Falls back to the latest price
-  /// when there is a single sample or zero elapsed time. Throws if `id` was never
-  /// recorded.
+  /// Time-weighted average over the retained window, weighting each sample by the
+  /// interval since the previous one (the oldest sample only anchors the window start).
+  /// Falls back to the latest price when there is a single sample or zero elapsed time.
+  /// Throws if `id` was never recorded.
   average(id: string): number {
     const list = this.samples.get(id);
     if (!list || list.length === 0) {
@@ -158,12 +161,10 @@ export class TwapAggregator {
     }
     if (list.length === 1) return list[0]!.price;
 
-    const now = this.now();
     let weighted = 0;
     let total = 0;
-    for (let i = 0; i < list.length; i++) {
-      const next = i < list.length - 1 ? list[i + 1]!.t : now;
-      const dt = Math.max(0, next - list[i]!.t);
+    for (let i = 1; i < list.length; i++) {
+      const dt = Math.max(0, list[i]!.t - list[i - 1]!.t);
       weighted += list[i]!.price * dt;
       total += dt;
     }

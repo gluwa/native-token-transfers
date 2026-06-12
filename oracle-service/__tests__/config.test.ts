@@ -29,12 +29,13 @@ describe("loadConfig", () => {
   it("loads defaults for optional fields", () => {
     const cfg = loadConfig(baseEnv());
     expect(cfg.oracleAddress).toBe(ORACLE_ADDRESS);
-    expect(cfg.mode).toBe("penguinswap");
-    expect(cfg.sourceTokenId).toBe("creditcoin-2");
+    expect(cfg.fallbackMode).toBe("penguinswap");
+    expect(cfg.sourceTokenIds).toEqual({ penguinswap: "creditcoin-2" });
     expect(cfg.coingeckoBaseUrl).toBe("https://api.coingecko.com/api/v3");
     expect(cfg.coingeckoApiKey).toBeUndefined();
     expect(cfg.pushIntervalMs).toBe(60_000);
     expect(cfg.twapWindowMs).toBe(300_000);
+    expect(cfg.txWaitTimeoutMs).toBe(120_000);
     expect(cfg.retry).toEqual({
       maxAttempts: 3,
       initialDelayMs: 200,
@@ -53,23 +54,40 @@ describe("loadConfig", () => {
     expect(c.baseFee).toBe(1_000_000_000_000_000n);
   });
 
-  it("selects the source token id matching the mode", () => {
-    const twapCfg = loadConfig({
+  it("collects source token ids for both modes", () => {
+    const cfg = loadConfig({
       ...baseEnv(),
       ORACLE_PRICING_MODE: "twap",
       ORACLE_SOURCE_TOKEN_ID_TWAP: "attestcoin",
     });
-    expect(twapCfg.mode).toBe("twap");
-    expect(twapCfg.sourceTokenId).toBe("attestcoin");
+    expect(cfg.fallbackMode).toBe("twap");
+    expect(cfg.sourceTokenIds).toEqual({
+      twap: "attestcoin",
+      penguinswap: "creditcoin-2",
+    });
   });
 
-  it("requires the mode-specific source token id", () => {
+  it("requires the fallback mode's source token id", () => {
     const env: NodeJS.ProcessEnv = {
       ...baseEnv(),
       ORACLE_PRICING_MODE: "twap",
     };
-    delete env.ORACLE_SOURCE_TOKEN_ID_PENGUINSWAP;
     expect(() => loadConfig(env)).toThrow(/ORACLE_SOURCE_TOKEN_ID_TWAP/);
+  });
+
+  it("allows omitting ORACLE_PRICING_MODE (contract-detected mode)", () => {
+    const env = baseEnv();
+    delete env.ORACLE_PRICING_MODE;
+    const cfg = loadConfig(env);
+    expect(cfg.fallbackMode).toBeUndefined();
+    expect(cfg.sourceTokenIds.penguinswap).toBe("creditcoin-2");
+  });
+
+  it("requires at least one source token id", () => {
+    const env = baseEnv();
+    delete env.ORACLE_PRICING_MODE;
+    delete env.ORACLE_SOURCE_TOKEN_ID_PENGUINSWAP;
+    expect(() => loadConfig(env)).toThrow(/at least one/);
   });
 
   it("throws when required env vars are missing", () => {
@@ -122,6 +140,22 @@ describe("loadConfig", () => {
     });
     expect(cfg.chains[0]!.priceBuffer).toBe(0n);
     expect(cfg.chains[0]!.baseFee).toBe(0n);
+  });
+
+  it("treats empty-string numeric env vars as unset, not zero", () => {
+    const cfg = loadConfig({
+      ...baseEnv(),
+      ORACLE_TWAP_WINDOW_MS: "",
+      ORACLE_PUSH_INTERVAL_MS: "  ",
+    });
+    expect(cfg.twapWindowMs).toBe(300_000);
+    expect(cfg.pushIntervalMs).toBe(60_000);
+  });
+
+  it("rejects non-integer numeric env vars", () => {
+    expect(() =>
+      loadConfig({ ...baseEnv(), ORACLE_TWAP_WINDOW_MS: "abc" })
+    ).toThrow(/ORACLE_TWAP_WINDOW_MS/);
   });
 
   it("rejects bad retry bounds", () => {

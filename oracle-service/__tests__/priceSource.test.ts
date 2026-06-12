@@ -142,15 +142,27 @@ describe("TwapAggregator", () => {
     expect(agg.average("x")).toBe(100);
   });
 
-  it("time-weights samples across the window", () => {
+  it("weights each sample by the interval it closes", () => {
+    let clock = 0;
+    const agg = new TwapAggregator(10_000, () => clock);
+    agg.record("x", 100); // t=0 — anchors the window start only
+    clock = 100;
+    agg.record("x", 200); // closes (0, 100]
+    clock = 200;
+    agg.record("x", 400); // closes (100, 200]
+    // (200*100 + 400*100) / 200 = 300
+    expect(agg.average("x")).toBe(300);
+  });
+
+  it("the freshest sample carries weight immediately", () => {
     let clock = 0;
     const agg = new TwapAggregator(10_000, () => clock);
     agg.record("x", 100); // t=0
     clock = 100;
-    agg.record("x", 200); // t=100
-    clock = 200; // now
-    // sample0 weighted by 100ms @100, sample1 by 100ms @200 -> (10000+20000)/200 = 150
-    expect(agg.average("x")).toBe(150);
+    agg.record("x", 200); // t=100, just fetched
+    // averaging right after the fetch must reflect the new price — with only the
+    // anchor before it, the latest sample owns the whole elapsed interval.
+    expect(agg.average("x")).toBe(200);
   });
 
   it("evicts samples older than the window", () => {

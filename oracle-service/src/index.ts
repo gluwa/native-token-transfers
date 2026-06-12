@@ -31,7 +31,7 @@ export type {
   RpcOracleWriterOptions,
 } from "./oracle.js";
 
-export { runTick, startRunner } from "./runner.js";
+export { resolveMode, runTick, startRunner } from "./runner.js";
 export type {
   RunnerDeps,
   RunnerHandle,

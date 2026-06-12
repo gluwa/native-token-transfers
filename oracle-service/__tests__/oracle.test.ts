@@ -27,6 +27,17 @@ class HttpStatusError extends Error {
   }
 }
 
+/// Thrown by a handler to produce a JSON-RPC error response (e.g. an eth_call revert,
+/// which is what a contract without the requested function returns).
+class JsonRpcError extends Error {
+  constructor(
+    public readonly code: number,
+    message: string
+  ) {
+    super(message);
+  }
+}
+
 async function withMockRpc(
   handler: RpcHandler,
   fn: (url: string, requests: RpcRequest[]) => Promise<void>
@@ -41,7 +52,18 @@ async function withMockRpc(
       try {
         const responses = items.map((item) => {
           requests.push(item);
-          return { jsonrpc: "2.0", id: item.id, result: handler(item) };
+          try {
+            return { jsonrpc: "2.0", id: item.id, result: handler(item) };
+          } catch (err) {
+            if (err instanceof JsonRpcError) {
+              return {
+                jsonrpc: "2.0",
+                id: item.id,
+                error: { code: err.code, message: err.message },
+              };
+            }
+            throw err;
+          }
         });
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify(Array.isArray(parsed) ? responses : responses[0]));
@@ -143,6 +165,102 @@ describe("RpcOracleWriter.assertAuthorized", () => {
         }
       );
     });
+  });
+});
+
+describe("RpcOracleWriter.pricingMode", () => {
+  const PRICING_MODE_SELECTOR = iface.getFunction("pricingMode")!.selector;
+
+  /// eth_call handler that answers pricingMode() with `respond` and anything else
+  /// (chainId aside) with an error.
+  function pricingModeHandler(respond: () => unknown): RpcHandler {
+    return (req) => {
+      if (req.method === "eth_chainId") return "0x7a69";
+      if (req.method === "eth_call") {
+        const data = (req.params as Array<{ data: string }>)[0]!.data;
+        if (data.slice(0, 10) === PRICING_MODE_SELECTOR) return respond();
+        throw new Error(`unexpected eth_call ${data.slice(0, 10)}`);
+      }
+      throw new Error(`unexpected RPC method ${req.method}`);
+    };
+  }
+
+  it("maps 0 -> twap and 1 -> penguinswap", async () => {
+    for (const [raw, mode] of [
+      [0, "twap"],
+      [1, "penguinswap"],
+    ] as const) {
+      await withMockRpc(
+        pricingModeHandler(() =>
+          iface.encodeFunctionResult("pricingMode", [raw])
+        ),
+        async (url) => {
+          await withWriter({ rpcUrl: url }, async (w) => {
+            await expect(w.pricingMode()).resolves.toBe(mode);
+          });
+        }
+      );
+    }
+  });
+
+  it("returns undefined when the call reverts (contract predates the getter)", async () => {
+    await withMockRpc(
+      pricingModeHandler(() => {
+        throw new JsonRpcError(3, "execution reverted");
+      }),
+      async (url) => {
+        await withWriter({ rpcUrl: url }, async (w) => {
+          await expect(w.pricingMode()).resolves.toBeUndefined();
+        });
+      }
+    );
+  });
+
+  it("returns undefined when the call returns empty data", async () => {
+    await withMockRpc(
+      pricingModeHandler(() => "0x"),
+      async (url) => {
+        await withWriter({ rpcUrl: url }, async (w) => {
+          await expect(w.pricingMode()).resolves.toBeUndefined();
+        });
+      }
+    );
+  });
+
+  it("rejects an unknown mode value", async () => {
+    await withMockRpc(
+      pricingModeHandler(() => iface.encodeFunctionResult("pricingMode", [7])),
+      async (url) => {
+        await withWriter({ rpcUrl: url }, async (w) => {
+          await expect(w.pricingMode()).rejects.toThrow(/unknown pricingMode/);
+        });
+      }
+    );
+  });
+
+  it("throws (after retry) on transient transport failure instead of falling back", async () => {
+    let attempts = 0;
+    await withMockRpc(
+      pricingModeHandler(() => {
+        attempts += 1;
+        throw new HttpStatusError(503);
+      }),
+      async (url) => {
+        await withWriter(
+          {
+            rpcUrl: url,
+            retry: { maxAttempts: 2, initialDelayMs: 1, maxDelayMs: 1 },
+            sleep: () => Promise.resolve(),
+          },
+          async (w) => {
+            await expect(w.pricingMode()).rejects.toMatchObject({
+              code: "SERVER_ERROR",
+            });
+            expect(attempts).toBe(2);
+          }
+        );
+      }
+    );
   });
 });
 

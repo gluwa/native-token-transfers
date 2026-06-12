@@ -124,8 +124,8 @@ maybe("oracle end-to-end against anvil", () => {
 
   it("pushes sourcePrice and per-chain PricingData via a real tick", async () => {
     const config = {
-      sourceTokenId: "creditcoin-2",
-      mode: "penguinswap",
+      sourceTokenIds: { penguinswap: "creditcoin-2" },
+      fallbackMode: "penguinswap",
       chains: [
         {
           chainId: DST_CHAIN,
@@ -156,6 +156,10 @@ maybe("oracle end-to-end against anvil", () => {
       // Boot check: the deployer key is the registered oracleService.
       await writer.assertAuthorized(new Wallet(DEPLOYER_KEY).address);
 
+      // The deployed quoter predates the SMC-1681 pricingMode() getter, so detection
+      // reports undefined and the tick prices under the configured fallback mode.
+      await expect(writer.pricingMode()).resolves.toBeUndefined();
+
       const result = await runTick({
         config,
         priceSource,
@@ -174,9 +178,45 @@ maybe("oracle end-to-end against anvil", () => {
       expect(pd.dstGasPrice).toBeGreaterThan(0n);
       expect(pd.priceBuffer).toBe(750n);
       expect(pd.baseFee).toBe(1_000_000_000_000_000n);
+
+      expect(result.mode).toBe("penguinswap");
+      expect(result.modeSource).toBe("config");
     } finally {
       writer.dispose();
       gasReader.dispose();
     }
   }, 60_000);
+
+  it("times out waiting for a stuck transaction instead of hanging the loop", async () => {
+    const writer = new RpcOracleWriter({
+      rpcUrl: anvil.rpcUrl,
+      contractAddress: quoterAddress,
+      signingKey: new Wallet(DEPLOYER_KEY).signingKey,
+      staticNetwork: true,
+      txWaitTimeoutMs: 1_000,
+    });
+    try {
+      // With automine off the tx is accepted into the pool but never mined — the
+      // bounded wait must reject instead of blocking the push loop forever.
+      await provider.send("anvil_setAutomine", [false]);
+      await expect(
+        writer.pushPrices(usdToScaled(0.5), [
+          {
+            chainId: DST_CHAIN,
+            pricing: {
+              dstPrice: usdToScaled(3000),
+              dstGasPrice: 1n,
+              priceBuffer: 0n,
+              baseFee: 0n,
+            },
+          },
+        ])
+      ).rejects.toMatchObject({ code: "TIMEOUT" });
+    } finally {
+      await provider.send("anvil_setAutomine", [true]);
+      // Flush the stranded tx so it can't bleed into other tests.
+      await provider.send("evm_mine", []);
+      writer.dispose();
+    }
+  }, 30_000);
 });
