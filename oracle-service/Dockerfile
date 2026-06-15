@@ -38,8 +38,9 @@ ENV NODE_ENV=production \
 
 # Liveness via heartbeat file: the runner touches ORACLE_HEARTBEAT_FILE after every
 # successful push. We treat the service as unhealthy if the file is missing or older
-# than 3 push intervals (so one transient skipped cycle doesn't flap the probe).
+# than 3 push intervals plus one receipt-wait timeout (so one transient skipped cycle
+# — including a tick spent waiting out a stuck transaction — doesn't flap the probe).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD node -e "const fs=require('fs');const f=process.env.ORACLE_HEARTBEAT_FILE||'/tmp/oracle-heartbeat';const maxAge=3*Number(process.env.ORACLE_PUSH_INTERVAL_MS||60000);try{if(Date.now()-fs.statSync(f).mtimeMs>maxAge)process.exit(1)}catch{process.exit(1)}"
+  CMD node -e "const fs=require('fs');const f=process.env.ORACLE_HEARTBEAT_FILE||'/tmp/oracle-heartbeat';const maxAge=3*Number(process.env.ORACLE_PUSH_INTERVAL_MS||60000)+Number(process.env.ORACLE_TX_WAIT_TIMEOUT_MS||120000);try{if(Date.now()-fs.statSync(f).mtimeMs>maxAge)process.exit(1)}catch{process.exit(1)}"
 
 CMD ["node", "dist/esm/bin.js"]

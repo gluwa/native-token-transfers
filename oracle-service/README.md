@@ -65,7 +65,7 @@ All config is via environment variables:
 - `priceBuffer` — per-chain upward adjustment in basis points (uint64).
 - `baseFee` — flat fee in source-chain native wei (uint64; number or string).
 
-Retry only kicks in for transient failures (RPC `NETWORK_ERROR`/`SERVER_ERROR`/`TIMEOUT`, CoinGecko 5xx/429, transport errors). Contract reverts and CoinGecko 4xx are not retried. The `batchPriceUpdate` send itself is **not** retried within a tick — a transient failure simply skips to the next interval, which overwrites prices anyway, so there is no double-submission risk. Waiting for the receipt is bounded by `ORACLE_TX_WAIT_TIMEOUT_MS` so a transaction stuck in the mempool fails the tick instead of freezing the loop. Note that mode detection deliberately does **not** fall back to `ORACLE_PRICING_MODE` on a transient RPC failure — the tick is skipped rather than priced under a guessed mode.
+Retry only kicks in for transient failures (RPC `NETWORK_ERROR`/`SERVER_ERROR`/`TIMEOUT`, CoinGecko 5xx/429, transport errors). Contract reverts and CoinGecko 4xx are not retried. The `batchPriceUpdate` send itself is **not** retried within a tick — a transient failure simply skips to the next interval, which overwrites prices anyway, so there is no double-submission risk. Waiting for the receipt is bounded by `ORACLE_TX_WAIT_TIMEOUT_MS` so a transaction stuck in the mempool fails the tick instead of freezing the loop; the next tick reuses the stuck transaction's nonce (replacing it at current gas) rather than queueing behind it. Note that mode detection deliberately does **not** fall back to `ORACLE_PRICING_MODE` on a transient RPC failure — the tick is skipped rather than priced under a guessed mode.
 
 ## Development
 

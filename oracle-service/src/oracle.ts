@@ -8,12 +8,7 @@ import {
 } from "ethers";
 
 import type { ChainConfig, PricingMode } from "./config.js";
-import {
-  DEFAULT_RETRY,
-  type RetryOptions,
-  isTransientRpcError,
-  withRetry,
-} from "./retry.js";
+import { DEFAULT_RETRY, type RetryOptions, withRetry } from "./retry.js";
 
 /// Mirrors PenguinBridgeExecutionQuoter.PricingData. All fields are uint64.
 export interface PricingData {
@@ -141,10 +136,15 @@ export class RpcOracleWriter implements OracleWriter {
         this.sleep
       )) as bigint;
     } catch (err) {
-      if (isTransientRpcError(err)) throw err;
-      // CALL_EXCEPTION / BAD_DATA — the deployed contract predates the SMC-1681
-      // getter; the caller falls back to the configured mode.
-      return undefined;
+      // Only a revert (CALL_EXCEPTION) or undecodable empty return (BAD_DATA) means
+      // the deployed contract predates the SMC-1681 getter — fall back to the
+      // configured mode. Anything else (transient or unknown) propagates so the tick
+      // is skipped rather than priced under a guessed mode.
+      const code = (err as { code?: unknown }).code;
+      if (code === "CALL_EXCEPTION" || code === "BAD_DATA") {
+        return undefined;
+      }
+      throw err;
     }
     if (raw === 0n) return "twap";
     if (raw === 1n) return "penguinswap";
@@ -157,17 +157,23 @@ export class RpcOracleWriter implements OracleWriter {
   ): Promise<string> {
     const chainIds = updates.map((u) => u.chainId);
     const prices = updates.map((u) => u.pricing);
+    // Nonce from "latest", not the default "pending": if a previous tick's tx is
+    // stuck in the mempool, this tick reuses its nonce and replaces it (at current
+    // gas) instead of queueing behind it forever. A replacement rejected as
+    // underpriced just fails this tick; later ticks keep trying as gas moves.
+    const nonce = await this.wallet.getNonce("latest");
     const tx = (await this.contract["batchPriceUpdate"]!(
       sourcePrice,
       chainIds,
-      prices
+      prices,
+      { nonce }
     )) as {
       hash: string;
       wait: (confirms?: number, timeout?: number) => Promise<unknown>;
     };
     // Bounded wait: a stuck transaction (underpriced, source chain stalled) rejects
     // with code TIMEOUT instead of hanging the push loop forever; the tick is logged
-    // as skipped and the next interval re-prices with a fresh nonce.
+    // as skipped and the next interval replaces it.
     await tx.wait(1, this.txWaitTimeoutMs);
     return tx.hash;
   }

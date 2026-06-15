@@ -109,6 +109,9 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ ...baseEnv(), ORACLE_CHAINS: "[]" })).toThrow(
       /non-empty/
     );
+    expect(() =>
+      loadConfig({ ...baseEnv(), ORACLE_CHAINS: "[null]" })
+    ).toThrow(/must be an object/);
   });
 
   it("rejects out-of-range chainId and duplicates", () => {

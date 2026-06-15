@@ -6,7 +6,7 @@ import type {
 } from "../src/oracle.js";
 import type { PriceSource } from "../src/priceSource.js";
 import { TwapAggregator } from "../src/priceSource.js";
-import { runTick } from "../src/runner.js";
+import { runTick, startRunner } from "../src/runner.js";
 import { usdToScaled } from "../src/scaling.js";
 
 function makeConfig(
@@ -16,6 +16,7 @@ function makeConfig(
   return {
     sourceTokenIds,
     fallbackMode,
+    pushIntervalMs: 60_000,
     chains: [
       {
         chainId: 2,
@@ -170,6 +171,37 @@ describe("runTick", () => {
       })
     ).rejects.toThrow(/ethereum/);
     expect(writer.calls).toHaveLength(0);
+  });
+
+  it("a failing post-push hook is logged but does not relabel the push as skipped", async () => {
+    const writer = writerSpy();
+    const infos: string[] = [];
+    const errors: string[] = [];
+    const handle = startRunner({
+      config: makeConfig("penguinswap", { penguinswap: "creditcoin-2" }),
+      priceSource: priceSourceStub({ "creditcoin-2": 0.5, ethereum: 3000 }),
+      twap: spotTwap(),
+      gasReader: gasReaderStub({ 2: 1n }),
+      writer,
+      onSuccess: () => {
+        throw new Error("disk full");
+      },
+      logger: {
+        info: (m) => infos.push(m),
+        error: (m) => errors.push(m),
+      },
+    });
+    // The first tick runs immediately; poll until it lands rather than racing a
+    // fixed timer (the push interval is 60s, so exactly one tick can occur).
+    for (let i = 0; i < 100 && writer.calls.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    handle.stop();
+
+    expect(writer.calls).toHaveLength(1);
+    expect(infos.some((m) => m.includes("pushed sourcePrice"))).toBe(true);
+    expect(errors.some((m) => m.includes("post-push hook failed"))).toBe(true);
+    expect(errors.some((m) => m.includes("tick skipped"))).toBe(false);
   });
 
   it("skips the push when a gas read fails", async () => {

@@ -120,6 +120,9 @@ function parseChains(raw: string): ChainConfig[] {
   }
   const seen = new Set<number>();
   return parsed.map((item, i) => {
+    if (typeof item !== "object" || item === null) {
+      throw new Error(`ORACLE_CHAINS[${i}] must be an object`);
+    }
     const c = item as RawChainConfig;
     const chainId = c.chainId;
     if (

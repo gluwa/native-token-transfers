@@ -195,23 +195,40 @@ maybe("oracle end-to-end against anvil", () => {
       staticNetwork: true,
       txWaitTimeoutMs: 1_000,
     });
+    const updates = [
+      {
+        chainId: DST_CHAIN,
+        pricing: {
+          dstPrice: usdToScaled(3000),
+          dstGasPrice: 1n,
+          priceBuffer: 0n,
+          baseFee: 0n,
+        },
+      },
+    ];
+    const oracleAddr = new Wallet(DEPLOYER_KEY).address;
     try {
       // With automine off the tx is accepted into the pool but never mined — the
       // bounded wait must reject instead of blocking the push loop forever.
       await provider.send("anvil_setAutomine", [false]);
       await expect(
-        writer.pushPrices(usdToScaled(0.5), [
-          {
-            chainId: DST_CHAIN,
-            pricing: {
-              dstPrice: usdToScaled(3000),
-              dstGasPrice: 1n,
-              priceBuffer: 0n,
-              baseFee: 0n,
-            },
-          },
-        ])
+        writer.pushPrices(usdToScaled(0.5), updates)
       ).rejects.toMatchObject({ code: "TIMEOUT" });
+
+      // Exactly one tx pending (the stuck one).
+      const latest = await provider.getTransactionCount(oracleAddr, "latest");
+      const pending = await provider.getTransactionCount(oracleAddr, "pending");
+      expect(pending).toBe(latest + 1);
+
+      // The next push must reuse the stuck tx's nonce (a replacement attempt — it
+      // may be rejected as underpriced or time out itself), NOT queue a second tx
+      // behind it. Either way the pending count must not grow.
+      await writer.pushPrices(usdToScaled(0.6), updates).catch(() => undefined);
+      const pendingAfter = await provider.getTransactionCount(
+        oracleAddr,
+        "pending"
+      );
+      expect(pendingAfter).toBe(latest + 1);
     } finally {
       await provider.send("anvil_setAutomine", [true]);
       // Flush the stranded tx so it can't bleed into other tests.

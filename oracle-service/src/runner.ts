@@ -127,11 +127,19 @@ export function startRunner(deps: RunnerDeps): RunnerHandle {
     if (stopped) return;
     try {
       const result = await runTick(deps);
-      deps.onSuccess?.();
       logger.info(
         `pushed sourcePrice=${result.sourcePrice} (mode=${result.mode} via ${result.modeSource}) ` +
           `to ${result.updates.length} chain(s) in tx ${result.txHash}`
       );
+      // After the success log: a failing heartbeat write must not relabel a push
+      // that landed on-chain as a skipped tick.
+      try {
+        deps.onSuccess?.();
+      } catch (err) {
+        logger.error(
+          `post-push hook failed (push succeeded): ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
     } catch (err) {
       logger.error(
         `tick skipped: ${err instanceof Error ? err.message : String(err)}`
