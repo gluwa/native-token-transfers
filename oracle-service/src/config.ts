@@ -176,8 +176,8 @@ export function loadConfig(
     );
   }
 
-  const pushIntervalMs = parseIntEnv(env, "ORACLE_PUSH_INTERVAL_MS", 60_000, 1);
-  const twapWindowMs = parseIntEnv(env, "ORACLE_TWAP_WINDOW_MS", 300_000, 0);
+  const pushIntervalMs = parseIntEnv(env, "ORACLE_PUSH_INTERVAL_MS", 60_000, 15);
+  const twapWindowMs = parseIntEnv(env, "ORACLE_TWAP_WINDOW_MS", 300_000, 15);
   const txWaitTimeoutMs = parseIntEnv(
     env,
     "ORACLE_TX_WAIT_TIMEOUT_MS",
