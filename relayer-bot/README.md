@@ -64,7 +64,7 @@ All config is via environment variables. The role is set with `--role=<role>` (o
 | `WORMHOLESCAN_URL` | no | `https://api.wormholescan.io` | VAA source (use the testnet host on testnet). |
 | `RELAYER_DEV_GUARDIAN_KEY` | no | | If set, self-sign VAAs with this dev guardian key instead of Wormholescan. Requires `RELAYER_USE_DEV_SECRETS=true` (refused otherwise). |
 | `SLACK_WEBHOOK_URL` | no | | Slack incoming webhook for alerts (alerts log-only if unset). |
-| `SCAN_BLOCK_RANGE` | no | `200` | Max blocks scanned per `getLogs` range. (Legacy alias: `SCAN_INTERVAL_MS` — a block count despite the name.) |
+| `SCAN_BLOCK_RANGE` | no | `200` | Max blocks scanned per `getLogs` range. |
 | `RELAYER_SCAN_LOOP_DELAY_MS` | no | `2000` | Sleep between scan iterations. |
 | `QUEUE_VISIBILITY_TIMEOUT_MS` | no | `60000` | In-flight message visibility timeout. |
 | `WALLET_MIN_BALANCE` | no | `0.05` | Low-balance alert threshold, in ETH. |
