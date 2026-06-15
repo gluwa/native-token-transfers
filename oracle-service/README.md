@@ -27,6 +27,18 @@ Both modes also push each destination chain's native-token USD price as `dstPric
 
 At startup the service reads `oracleService()` and refuses to run unless it equals the signing address, then resolves the initial mode the same way a tick would and refuses to run if it can't.
 
+## Prerequisites
+
+Before the service can push a single price, the following must be true:
+
+1. **`PenguinBridgeExecutionQuoter` is deployed** on the source chain and its address is `ORACLE_CONTRACT_ADDRESS`.
+2. **The contract owner has called `setOracleService(<oracle address>)`** with the address of `ORACLE_PRIVATE_KEY`. The service reads `oracleService()` at boot and exits non-zero if it doesn't match (pushing prices the contract would reject is worse than failing loudly).
+3. **The oracle wallet is funded with source-chain native token.** Every tick sends a `batchPriceUpdate` transaction, so the signing key needs gas. This is *not* checked at startup — an unfunded key simply skips every tick (logged), and the heartbeat goes stale.
+4. **Reachable RPCs**: the source-chain RPC (`ORACLE_RPC_URL`) plus **each destination chain's RPC** (`ORACLE_CHAINS[].rpcUrl`, read every tick for gas price).
+5. **Valid CoinGecko ids** for the active mode's source token and every destination chain's native token. CoinGecko's free tier works without a key.
+
+> **Note on `ORACLE_PRICING_MODE`.** Until the SMC-1681 `pricingMode()` getter ships on the contract, mode detection always falls back to this env var, so it is effectively **required**. At launch the mode is `penguinswap` (ATTEST trades only against CTC), so set `ORACLE_PRICING_MODE=penguinswap` and `ORACLE_SOURCE_TOKEN_ID_PENGUINSWAP=<ctc coingecko id>`.
+
 ## Configuration
 
 All config is via environment variables:
@@ -92,7 +104,20 @@ Multi-stage Dockerfile; runtime is `node:20-alpine` as a non-root user. Build fr
 docker build -t ntt-oracle-service:latest -f oracle-service/Dockerfile .
 ```
 
-There is no HTTP server. The Docker `HEALTHCHECK` checks that `ORACLE_HEARTBEAT_FILE` was touched within the last 3 push intervals, so set `ORACLE_HEARTBEAT_FILE` (defaulted to `/tmp/oracle-heartbeat` in the image) when relying on it.
+### Runtime model
+
+This is a **background worker**: it opens no socket, exposes no port, and serves no HTTP endpoint. It runs a push loop and must be deployed accordingly:
+
+- **No ingress / no port mapping.** There is nothing to route traffic to.
+- **No HTTP health probe.** A liveness/readiness probe that hits an HTTP endpoint will always fail and restart-loop the container.
+- **Liveness is the heartbeat file.** The runner touches `ORACLE_HEARTBEAT_FILE` (defaulted to `/tmp/oracle-heartbeat` in the image) after every successful push. The Docker `HEALTHCHECK` checks it's fresh (missing or older than `3 × push interval + one receipt-wait timeout` ⇒ unhealthy).
+- **The Dockerfile `HEALTHCHECK` only applies under plain Docker / docker-compose.** Azure Container Apps and Kubernetes ignore it and use their own probe config. To get the same self-healing there, configure an **exec/command probe** running the equivalent staleness check, e.g.:
+
+  ```
+  node -e "const fs=require('fs');const f=process.env.ORACLE_HEARTBEAT_FILE;const m=3*Number(process.env.ORACLE_PUSH_INTERVAL_MS||60000)+Number(process.env.ORACLE_TX_WAIT_TIMEOUT_MS||120000);process.exit(Date.now()-fs.statSync(f).mtimeMs>m?1:0)"
+  ```
+
+  Otherwise the container won't auto-restart on a wedged loop, it'll just stop pushing.
 
 ## Tests
 
