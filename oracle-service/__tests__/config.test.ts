@@ -9,7 +9,7 @@ const CHAINS = JSON.stringify([
     chainId: 2,
     rpcUrl: "http://eth.test",
     coingeckoId: "ethereum",
-    priceBuffer: 500,
+    priceBuffer: "500",
     baseFee: "1000000000000000",
   },
 ]);
@@ -19,7 +19,6 @@ function baseEnv(): NodeJS.ProcessEnv {
     ORACLE_PRIVATE_KEY,
     ORACLE_RPC_URL: "http://rpc.test",
     ORACLE_CONTRACT_ADDRESS: "0x" + "1".repeat(40),
-    ORACLE_PRICING_MODE: "penguinswap",
     ORACLE_SOURCE_TOKEN_ID_PENGUINSWAP: "creditcoin-2",
     ORACLE_CHAINS: CHAINS,
   };
@@ -29,7 +28,6 @@ describe("loadConfig", () => {
   it("loads defaults for optional fields", () => {
     const cfg = loadConfig(baseEnv());
     expect(cfg.oracleAddress).toBe(ORACLE_ADDRESS);
-    expect(cfg.fallbackMode).toBe("penguinswap");
     expect(cfg.sourceTokenIds).toEqual({ penguinswap: "creditcoin-2" });
     expect(cfg.coingeckoBaseUrl).toBe("https://api.coingecko.com/api/v3");
     expect(cfg.coingeckoApiKey).toBeUndefined();
@@ -54,38 +52,19 @@ describe("loadConfig", () => {
     expect(c.baseFee).toBe(1_000_000_000_000_000n);
   });
 
-  it("collects source token ids for both modes", () => {
+  it("collects source token ids for whichever modes are configured", () => {
     const cfg = loadConfig({
       ...baseEnv(),
-      ORACLE_PRICING_MODE: "twap",
       ORACLE_SOURCE_TOKEN_ID_TWAP: "attestcoin",
     });
-    expect(cfg.fallbackMode).toBe("twap");
     expect(cfg.sourceTokenIds).toEqual({
       twap: "attestcoin",
       penguinswap: "creditcoin-2",
     });
   });
 
-  it("requires the fallback mode's source token id", () => {
-    const env: NodeJS.ProcessEnv = {
-      ...baseEnv(),
-      ORACLE_PRICING_MODE: "twap",
-    };
-    expect(() => loadConfig(env)).toThrow(/ORACLE_SOURCE_TOKEN_ID_TWAP/);
-  });
-
-  it("allows omitting ORACLE_PRICING_MODE (contract-detected mode)", () => {
-    const env = baseEnv();
-    delete env.ORACLE_PRICING_MODE;
-    const cfg = loadConfig(env);
-    expect(cfg.fallbackMode).toBeUndefined();
-    expect(cfg.sourceTokenIds.penguinswap).toBe("creditcoin-2");
-  });
-
   it("requires at least one source token id", () => {
     const env = baseEnv();
-    delete env.ORACLE_PRICING_MODE;
     delete env.ORACLE_SOURCE_TOKEN_ID_PENGUINSWAP;
     expect(() => loadConfig(env)).toThrow(/at least one/);
   });
@@ -94,12 +73,6 @@ describe("loadConfig", () => {
     const env = baseEnv();
     delete env.ORACLE_PRIVATE_KEY;
     expect(() => loadConfig(env)).toThrow(/ORACLE_PRIVATE_KEY/);
-  });
-
-  it("rejects an invalid pricing mode", () => {
-    expect(() =>
-      loadConfig({ ...baseEnv(), ORACLE_PRICING_MODE: "spot" })
-    ).toThrow(/ORACLE_PRICING_MODE/);
   });
 
   it("rejects malformed ORACLE_CHAINS", () => {
@@ -143,6 +116,49 @@ describe("loadConfig", () => {
     });
     expect(cfg.chains[0]!.priceBuffer).toBe(0n);
     expect(cfg.chains[0]!.baseFee).toBe(0n);
+  });
+
+  it("accepts large baseFee as a string without precision loss", () => {
+    // 1e16 wei (~0.01 ETH) + 1 — exceeds 2^53; only a string is exact.
+    const cfg = loadConfig({
+      ...baseEnv(),
+      ORACLE_CHAINS: JSON.stringify([
+        {
+          chainId: 2,
+          rpcUrl: "x",
+          coingeckoId: "ethereum",
+          baseFee: "10000000000000001",
+        },
+      ]),
+    });
+    expect(cfg.chains[0]!.baseFee).toBe(10_000_000_000_000_001n);
+  });
+
+  it("rejects a bare-number baseFee (amounts must be strings)", () => {
+    expect(() =>
+      loadConfig({
+        ...baseEnv(),
+        ORACLE_CHAINS: JSON.stringify([
+          {
+            chainId: 2,
+            rpcUrl: "x",
+            coingeckoId: "ethereum",
+            baseFee: 10000000000000001,
+          },
+        ]),
+      })
+    ).toThrow(/encoded as a string/);
+  });
+
+  it("rejects a bare-number priceBuffer (amounts must be strings)", () => {
+    expect(() =>
+      loadConfig({
+        ...baseEnv(),
+        ORACLE_CHAINS: JSON.stringify([
+          { chainId: 2, rpcUrl: "x", coingeckoId: "ethereum", priceBuffer: 500 },
+        ]),
+      })
+    ).toThrow(/encoded as a string/);
   });
 
   it("treats empty-string numeric env vars as unset, not zero", () => {

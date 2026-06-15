@@ -12,7 +12,7 @@ import {
   type PriceSource,
   TwapAggregator,
 } from "./priceSource.js";
-import { resolveMode, startRunner } from "./runner.js";
+import { readActiveMode, startRunner } from "./runner.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -47,12 +47,12 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Resolve the initial pricing mode the same way every tick will — fail fast if it
-  // can't be determined or its source token id is missing, rather than skipping every
-  // tick at runtime.
-  let initialMode: { mode: PricingMode; modeSource: "contract" | "config" };
+  // Read the contract's current mode once at startup the same way every tick will, so
+  // we fail fast if the contract isn't the required quoter (no pricingMode() getter) or
+  // the active mode's source token id is missing, rather than skipping every tick.
+  let initialMode: PricingMode;
   try {
-    initialMode = await resolveMode(writer, config);
+    initialMode = await readActiveMode(writer, config);
   } catch (err) {
     console.error(
       `startup mode detection failed: ${err instanceof Error ? err.message : String(err)}`
@@ -60,18 +60,6 @@ async function main(): Promise<void> {
     writer.dispose();
     gasReader.dispose();
     process.exit(1);
-  }
-  if (initialMode.modeSource === "config") {
-    console.log(
-      `contract does not expose pricingMode() yet; using ORACLE_PRICING_MODE=${initialMode.mode}`
-    );
-  } else if (
-    config.fallbackMode &&
-    config.fallbackMode !== initialMode.mode
-  ) {
-    console.warn(
-      `contract pricingMode()=${initialMode.mode} overrides ORACLE_PRICING_MODE=${config.fallbackMode}`
-    );
   }
 
   const onSuccess = config.heartbeatFile
@@ -88,8 +76,8 @@ async function main(): Promise<void> {
   });
 
   console.log(
-    `oracle-service started (mode=${initialMode.mode} via ${initialMode.modeSource}, ` +
-      `sourceToken=${config.sourceTokenIds[initialMode.mode]}, ` +
+    `oracle-service started (mode=${initialMode}, ` +
+      `sourceToken=${config.sourceTokenIds[initialMode]}, ` +
       `chains=${config.chains.map((c) => c.chainId).join(",")}, ` +
       `interval=${config.pushIntervalMs}ms, contract=${config.contractAddress})`
   );

@@ -203,25 +203,25 @@ describe("RpcOracleWriter.pricingMode", () => {
     }
   });
 
-  it("returns undefined when the call reverts (contract predates the getter)", async () => {
+  it("throws a clear error when the call reverts (contract lacks the getter)", async () => {
     await withMockRpc(
       pricingModeHandler(() => {
         throw new JsonRpcError(3, "execution reverted");
       }),
       async (url) => {
         await withWriter({ rpcUrl: url }, async (w) => {
-          await expect(w.pricingMode()).resolves.toBeUndefined();
+          await expect(w.pricingMode()).rejects.toThrow(/not callable/);
         });
       }
     );
   });
 
-  it("returns undefined when the call returns empty data", async () => {
+  it("throws when the call returns empty data (contract lacks the getter)", async () => {
     await withMockRpc(
       pricingModeHandler(() => "0x"),
       async (url) => {
         await withWriter({ rpcUrl: url }, async (w) => {
-          await expect(w.pricingMode()).resolves.toBeUndefined();
+          await expect(w.pricingMode()).rejects.toThrow(/not callable/);
         });
       }
     );

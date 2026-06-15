@@ -6,16 +6,14 @@ import type {
 } from "../src/oracle.js";
 import type { PriceSource } from "../src/priceSource.js";
 import { TwapAggregator } from "../src/priceSource.js";
-import { runTick, startRunner } from "../src/runner.js";
+import { readActiveMode, runTick, startRunner } from "../src/runner.js";
 import { usdToScaled } from "../src/scaling.js";
 
 function makeConfig(
-  fallbackMode: PricingMode | undefined,
   sourceTokenIds: Partial<Record<PricingMode, string>>
 ): OracleServiceConfig {
   return {
     sourceTokenIds,
-    fallbackMode,
     pushIntervalMs: 60_000,
     chains: [
       {
@@ -54,16 +52,18 @@ function gasReaderStub(byChain: Record<number, bigint>): GasPriceReader {
   return { gasPrice: async (chainId: number) => byChain[chainId]! };
 }
 
-/// `detectedMode` mimics the contract's pricingMode(): a PricingMode when the getter
-/// exists, undefined when the deployed contract predates it.
-function writerSpy(detectedMode?: PricingMode): OracleWriter & {
+/// `pricingMode` mimics the contract getter: it returns the current mode, or throws to
+/// simulate an RPC error / a contract that doesn't expose the getter.
+function writerSpy(
+  pricingMode: () => Promise<PricingMode> = async () => "penguinswap"
+): OracleWriter & {
   calls: Array<{ sourcePrice: bigint; updates: ChainPriceUpdate[] }>;
 } {
   const calls: Array<{ sourcePrice: bigint; updates: ChainPriceUpdate[] }> = [];
   return {
     calls,
     assertAuthorized: async () => undefined,
-    pricingMode: async () => detectedMode,
+    pricingMode,
     pushPrices: async (sourcePrice, updates) => {
       calls.push({ sourcePrice, updates });
       return "0xhash";
@@ -76,9 +76,9 @@ const spotTwap = (): TwapAggregator => new TwapAggregator(0, () => 0);
 
 describe("runTick", () => {
   it("penguinswap mode writes CTC/USD as sourcePrice and native/USD as dstPrice", async () => {
-    const writer = writerSpy();
+    const writer = writerSpy(async () => "penguinswap");
     const result = await runTick({
-      config: makeConfig("penguinswap", { penguinswap: "creditcoin-2" }),
+      config: makeConfig({ penguinswap: "creditcoin-2" }),
       priceSource: priceSourceStub({ "creditcoin-2": 0.5, ethereum: 3000 }),
       twap: spotTwap(),
       gasReader: gasReaderStub({ 2: 20_000_000_000n }),
@@ -88,7 +88,6 @@ describe("runTick", () => {
     expect(writer.calls).toHaveLength(1);
     expect(result.sourcePrice).toBe(usdToScaled(0.5));
     expect(result.mode).toBe("penguinswap");
-    expect(result.modeSource).toBe("config");
     const u = result.updates[0]!;
     expect(u.chainId).toBe(2);
     expect(u.pricing).toEqual({
@@ -100,56 +99,75 @@ describe("runTick", () => {
   });
 
   it("twap mode writes ATTEST/USD as sourcePrice", async () => {
-    const writer = writerSpy();
+    const writer = writerSpy(async () => "twap");
     const result = await runTick({
-      config: makeConfig("twap", { twap: "attestcoin" }),
+      config: makeConfig({ twap: "attestcoin" }),
       priceSource: priceSourceStub({ attestcoin: 5_000_000, ethereum: 3000 }),
       twap: spotTwap(),
       gasReader: gasReaderStub({ 2: 1n }),
       writer,
     });
+    expect(result.mode).toBe("twap");
     expect(result.sourcePrice).toBe(usdToScaled(5_000_000));
   });
 
-  it("a contract-detected mode overrides the configured fallback", async () => {
-    const writer = writerSpy("twap");
-    const priceSource = priceSourceStub({ attestcoin: 7, ethereum: 3000 });
-    const result = await runTick({
-      config: makeConfig("penguinswap", {
-        twap: "attestcoin",
-        penguinswap: "creditcoin-2",
-      }),
+  it("re-reads the contract mode each tick, so an on-chain toggle is picked up", async () => {
+    let mode: PricingMode = "penguinswap";
+    const writer = writerSpy(async () => mode);
+    const config = makeConfig({
+      twap: "attestcoin",
+      penguinswap: "creditcoin-2",
+    });
+    const priceSource = priceSourceStub({
+      "creditcoin-2": 0.5,
+      attestcoin: 7,
+      ethereum: 3000,
+    });
+    const twap = spotTwap();
+
+    const first = await runTick({
+      config,
       priceSource,
-      twap: spotTwap(),
+      twap,
       gasReader: gasReaderStub({ 2: 1n }),
       writer,
     });
-    expect(result.mode).toBe("twap");
-    expect(result.modeSource).toBe("contract");
-    expect(result.sourcePrice).toBe(usdToScaled(7));
-    // Only the active mode's source token is fetched.
-    expect(priceSource.requested[0]).toEqual(["attestcoin", "ethereum"]);
+    expect(first.mode).toBe("penguinswap");
+    expect(first.sourcePrice).toBe(usdToScaled(0.5));
+
+    mode = "twap"; // owner toggles on-chain
+    const second = await runTick({
+      config,
+      priceSource,
+      twap,
+      gasReader: gasReaderStub({ 2: 1n }),
+      writer,
+    });
+    expect(second.mode).toBe("twap");
+    expect(second.sourcePrice).toBe(usdToScaled(7));
   });
 
-  it("throws when the mode is undeterminable (no getter, no fallback)", async () => {
-    const writer = writerSpy();
+  it("skips the tick when the contract mode read fails", async () => {
+    const writer = writerSpy(async () => {
+      throw Object.assign(new Error("rpc flaky"), { code: "SERVER_ERROR" });
+    });
     await expect(
       runTick({
-        config: makeConfig(undefined, { penguinswap: "creditcoin-2" }),
+        config: makeConfig({ penguinswap: "creditcoin-2" }),
         priceSource: priceSourceStub({ "creditcoin-2": 0.5, ethereum: 3000 }),
         twap: spotTwap(),
         gasReader: gasReaderStub({ 2: 1n }),
         writer,
       })
-    ).rejects.toThrow(/cannot determine pricing mode/);
+    ).rejects.toThrow(/rpc flaky/);
     expect(writer.calls).toHaveLength(0);
   });
 
-  it("throws when the active mode has no configured source token id", async () => {
-    const writer = writerSpy("twap");
+  it("skips the tick when the active mode has no configured source token id", async () => {
+    const writer = writerSpy(async () => "twap");
     await expect(
       runTick({
-        config: makeConfig("penguinswap", { penguinswap: "creditcoin-2" }),
+        config: makeConfig({ penguinswap: "creditcoin-2" }),
         priceSource: priceSourceStub({ "creditcoin-2": 0.5, ethereum: 3000 }),
         twap: spotTwap(),
         gasReader: gasReaderStub({ 2: 1n }),
@@ -160,10 +178,10 @@ describe("runTick", () => {
   });
 
   it("skips the push (throws) when a required price is missing", async () => {
-    const writer = writerSpy();
+    const writer = writerSpy(async () => "penguinswap");
     await expect(
       runTick({
-        config: makeConfig("penguinswap", { penguinswap: "creditcoin-2" }),
+        config: makeConfig({ penguinswap: "creditcoin-2" }),
         priceSource: priceSourceStub({ "creditcoin-2": 0.5 }), // ethereum missing
         twap: spotTwap(),
         gasReader: gasReaderStub({ 2: 1n }),
@@ -174,11 +192,11 @@ describe("runTick", () => {
   });
 
   it("a failing post-push hook is logged but does not relabel the push as skipped", async () => {
-    const writer = writerSpy();
+    const writer = writerSpy(async () => "penguinswap");
     const infos: string[] = [];
     const errors: string[] = [];
     const handle = startRunner({
-      config: makeConfig("penguinswap", { penguinswap: "creditcoin-2" }),
+      config: makeConfig({ penguinswap: "creditcoin-2" }),
       priceSource: priceSourceStub({ "creditcoin-2": 0.5, ethereum: 3000 }),
       twap: spotTwap(),
       gasReader: gasReaderStub({ 2: 1n }),
@@ -205,10 +223,10 @@ describe("runTick", () => {
   });
 
   it("skips the push when a gas read fails", async () => {
-    const writer = writerSpy();
+    const writer = writerSpy(async () => "penguinswap");
     await expect(
       runTick({
-        config: makeConfig("penguinswap", { penguinswap: "creditcoin-2" }),
+        config: makeConfig({ penguinswap: "creditcoin-2" }),
         priceSource: priceSourceStub({ "creditcoin-2": 0.5, ethereum: 3000 }),
         twap: spotTwap(),
         gasReader: {
@@ -220,5 +238,32 @@ describe("runTick", () => {
       })
     ).rejects.toThrow(/rpc down/);
     expect(writer.calls).toHaveLength(0);
+  });
+});
+
+describe("readActiveMode", () => {
+  it("returns the contract's current mode", async () => {
+    const writer = writerSpy(async () => "twap");
+    const mode = await readActiveMode(
+      writer,
+      makeConfig({ twap: "attestcoin", penguinswap: "creditcoin-2" })
+    );
+    expect(mode).toBe("twap");
+  });
+
+  it("throws when the active mode has no configured source token id", async () => {
+    const writer = writerSpy(async () => "twap");
+    await expect(
+      readActiveMode(writer, makeConfig({ penguinswap: "creditcoin-2" }))
+    ).rejects.toThrow(/ORACLE_SOURCE_TOKEN_ID_TWAP/);
+  });
+
+  it("propagates a contract read failure (caller surfaces it)", async () => {
+    const writer = writerSpy(async () => {
+      throw new Error("pricingMode() is not callable");
+    });
+    await expect(
+      readActiveMode(writer, makeConfig({ penguinswap: "creditcoin-2" }))
+    ).rejects.toThrow(/not callable/);
   });
 });

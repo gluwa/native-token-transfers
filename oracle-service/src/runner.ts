@@ -32,43 +32,36 @@ export interface TickResult {
   txHash: string;
   sourcePrice: bigint;
   updates: ChainPriceUpdate[];
-  /// Mode the tick priced under, and whether it came from the contract or config.
+  /// Mode this tick priced under, read from the contract.
   mode: PricingMode;
-  modeSource: "contract" | "config";
 }
 
-/// Resolve the active pricing mode: the contract's `pricingMode()` wins (modes can be
-/// toggled on-chain at any time, SMC-1681); `fallbackMode` covers deployments that
-/// predate the getter. Throws when neither is available or the active mode has no
-/// configured source token id.
-export async function resolveMode(
+/// Read the contract's current pricing mode and confirm a CoinGecko source token id is
+/// configured for it. Throws — so the tick is skipped (or startup aborts) — if the
+/// contract read fails or the active mode has no configured token id. The mode is read
+/// fresh every tick because the owner can toggle it on-chain at any time.
+export async function readActiveMode(
   writer: OracleWriter,
   config: OracleServiceConfig
-): Promise<{ mode: PricingMode; modeSource: "contract" | "config" }> {
-  const detected = await writer.pricingMode();
-  const mode = detected ?? config.fallbackMode;
-  if (!mode) {
-    throw new Error(
-      "contract does not expose pricingMode() and ORACLE_PRICING_MODE is unset — cannot determine pricing mode"
-    );
-  }
+): Promise<PricingMode> {
+  const mode = await writer.pricingMode();
   if (!config.sourceTokenIds[mode]) {
     throw new Error(
       `active pricing mode is "${mode}" but ORACLE_SOURCE_TOKEN_ID_${mode.toUpperCase()} is unset`
     );
   }
-  return { mode, modeSource: detected !== undefined ? "contract" : "config" };
+  return mode;
 }
 
-/// Run a single detect-mode → fetch → time-weight → assemble → push cycle. Throws if
-/// any required price or gas read fails, so the caller skips the cycle rather than
-/// pushing partial or stale data — the contract retains its previous values.
+/// Run a single read-mode → fetch → time-weight → assemble → push cycle. Throws if the
+/// mode read, any price, or any gas read fails, so the caller skips the cycle rather
+/// than pushing partial or stale data — the contract retains its previous values.
 export async function runTick(deps: RunnerDeps): Promise<TickResult> {
   const { config, priceSource, twap, gasReader, writer } = deps;
 
-  // 1. Detect the active mode from the contract (fall back to config), per tick —
-  //    the owner can toggle modes between ticks.
-  const { mode, modeSource } = await resolveMode(writer, config);
+  // 1. Read the contract's current pricing mode (re-read every tick — it can be toggled
+  //    on-chain at any time).
+  const mode = await readActiveMode(writer, config);
   const sourceTokenId = config.sourceTokenIds[mode]!;
 
   // 2. Fetch every USD leg in one call: the source token + each chain's native token.
@@ -107,7 +100,7 @@ export async function runTick(deps: RunnerDeps): Promise<TickResult> {
 
   // 6. One atomic batchPriceUpdate.
   const txHash = await writer.pushPrices(sourcePrice, updates);
-  return { txHash, sourcePrice, updates, mode, modeSource };
+  return { txHash, sourcePrice, updates, mode };
 }
 
 export interface RunnerHandle {
@@ -128,7 +121,7 @@ export function startRunner(deps: RunnerDeps): RunnerHandle {
     try {
       const result = await runTick(deps);
       logger.info(
-        `pushed sourcePrice=${result.sourcePrice} (mode=${result.mode} via ${result.modeSource}) ` +
+        `pushed sourcePrice=${result.sourcePrice} (mode=${result.mode}) ` +
           `to ${result.updates.length} chain(s) in tx ${result.txHash}`
       );
       // After the success log: a failing heartbeat write must not relabel a push

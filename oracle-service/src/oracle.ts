@@ -28,11 +28,12 @@ export interface ChainPriceUpdate {
 export interface OracleWriter {
   /// Verify the signer is the contract's registered oracleService.
   assertAuthorized(oracleAddress: string): Promise<void>;
-  /// Read the contract's active pricing mode (the SMC-1681 `pricingMode()` getter,
-  /// 0 = twap, 1 = penguinswap). Returns undefined when the deployed contract predates
-  /// the getter, so callers fall back to the configured mode. Throws on transient RPC
-  /// failure (after retry) so a tick is skipped rather than priced under a guessed mode.
-  pricingMode(): Promise<PricingMode | undefined>;
+  /// Read the contract's current pricing mode via the `pricingMode()` getter
+  /// (0 = twap, 1 = penguinswap). Throws if the read fails — a transient RPC error
+  /// (after retry), or a contract that doesn't expose the getter at all (which means it
+  /// isn't the required quoter). Callers surface the error: skip the tick at runtime,
+  /// abort at startup.
+  pricingMode(): Promise<PricingMode>;
   /// Push the source price and per-chain pricing in one batchPriceUpdate tx. Returns
   /// the transaction hash. NOT internally retried — a transient send failure skips the
   /// tick and the next interval overwrites prices anyway, so we never risk a double
@@ -127,7 +128,7 @@ export class RpcOracleWriter implements OracleWriter {
     }
   }
 
-  async pricingMode(): Promise<PricingMode | undefined> {
+  async pricingMode(): Promise<PricingMode> {
     let raw: bigint;
     try {
       raw = (await withRetry(
@@ -136,13 +137,15 @@ export class RpcOracleWriter implements OracleWriter {
         this.sleep
       )) as bigint;
     } catch (err) {
-      // Only a revert (CALL_EXCEPTION) or undecodable empty return (BAD_DATA) means
-      // the deployed contract predates the SMC-1681 getter — fall back to the
-      // configured mode. Anything else (transient or unknown) propagates so the tick
-      // is skipped rather than priced under a guessed mode.
+      // A revert (CALL_EXCEPTION) or undecodable empty return (BAD_DATA) means the
+      // contract doesn't expose pricingMode() — i.e. it isn't the required quoter.
+      // Surface that clearly; other errors (transient, already retried) propagate as-is.
       const code = (err as { code?: unknown }).code;
       if (code === "CALL_EXCEPTION" || code === "BAD_DATA") {
-        return undefined;
+        throw new Error(
+          `PenguinBridgeExecutionQuoter(${String(this.contract.target)}).pricingMode() is not callable — ` +
+            `the deployed contract must expose the pricing-mode getter`
+        );
       }
       throw err;
     }

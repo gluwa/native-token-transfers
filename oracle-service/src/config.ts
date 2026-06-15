@@ -34,12 +34,9 @@ export interface OracleServiceConfig {
   rpcUrl: string;
   /// Address of PenguinBridgeExecutionQuoter on the source chain.
   contractAddress: string;
-  /// Pricing mode used when the contract does not expose `pricingMode()` (pre-SMC-1681
-  /// deployments). When the getter exists, the contract's mode always wins.
-  fallbackMode: PricingMode | undefined;
-  /// CoinGecko id priced into `sourcePrice`, per mode. Only the active mode's id is
-  /// needed — e.g. at launch ATTEST has no USD market, so only the penguinswap id
-  /// (CTC) exists.
+  /// CoinGecko id priced into `sourcePrice`, per mode. The active mode is read from the
+  /// contract each tick, so configure the id for any mode the contract may be in. At
+  /// launch ATTEST has no USD market, so typically only the penguinswap id (CTC) exists.
   sourceTokenIds: Partial<Record<PricingMode, string>>;
   /// CoinGecko REST base URL.
   coingeckoBaseUrl: string;
@@ -95,17 +92,20 @@ function parseIntEnv(
   return value;
 }
 
+/// Parse a uint64 amount field (`priceBuffer` in bps, `baseFee` in wei). Per EVM
+/// convention these must be **decimal strings**: a bare JSON number loses precision in
+/// `JSON.parse` once it exceeds 2^53 (a `baseFee` of 1e16 wei ≈ 0.01 ETH already does),
+/// and `JSON.parse` corrupts it before we ever see it. Omitted ⇒ 0.
 function parseUint64Field(name: string, raw: unknown): bigint {
-  if (typeof raw === "number") {
-    if (!Number.isInteger(raw)) {
-      throw new Error(`${name} must be an integer, got ${raw}`);
-    }
-    return assertUint64(BigInt(raw), name);
+  if (raw === undefined || raw === null) {
+    return 0n;
   }
   if (typeof raw === "string" && /^\d+$/.test(raw.trim())) {
     return assertUint64(BigInt(raw.trim()), name);
   }
-  throw new Error(`${name} must be a non-negative integer, got ${String(raw)}`);
+  throw new Error(
+    `${name} must be a non-negative integer encoded as a string (e.g. "1000000000000000"), got ${String(raw)}`
+  );
 }
 
 function parseChains(raw: string): ChainConfig[] {
@@ -151,20 +151,11 @@ function parseChains(raw: string): ChainConfig[] {
       coingeckoId: c.coingeckoId,
       priceBuffer: parseUint64Field(
         `ORACLE_CHAINS[${i}].priceBuffer`,
-        c.priceBuffer ?? 0
+        c.priceBuffer
       ),
-      baseFee: parseUint64Field(`ORACLE_CHAINS[${i}].baseFee`, c.baseFee ?? 0),
+      baseFee: parseUint64Field(`ORACLE_CHAINS[${i}].baseFee`, c.baseFee),
     };
   });
-}
-
-function parseMode(raw: string): PricingMode {
-  if (raw === "twap" || raw === "penguinswap") {
-    return raw;
-  }
-  throw new Error(
-    `ORACLE_PRICING_MODE must be "twap" or "penguinswap", got ${raw}`
-  );
 }
 
 export function loadConfig(
@@ -172,11 +163,8 @@ export function loadConfig(
 ): OracleServiceConfig {
   const wallet = new Wallet(required(env, "ORACLE_PRIVATE_KEY"));
 
-  const rawMode = env["ORACLE_PRICING_MODE"];
-  const fallbackMode =
-    rawMode === undefined || rawMode.trim() === ""
-      ? undefined
-      : parseMode(rawMode.trim());
+  // The active mode is read from the contract each tick; configure the source token id
+  // for whichever mode(s) the contract may be in. At least one is required.
   const sourceTokenIds: Partial<Record<PricingMode, string>> = {};
   const twapId = env["ORACLE_SOURCE_TOKEN_ID_TWAP"];
   if (twapId) sourceTokenIds.twap = twapId;
@@ -185,11 +173,6 @@ export function loadConfig(
   if (!sourceTokenIds.twap && !sourceTokenIds.penguinswap) {
     throw new Error(
       "at least one of ORACLE_SOURCE_TOKEN_ID_TWAP / ORACLE_SOURCE_TOKEN_ID_PENGUINSWAP is required"
-    );
-  }
-  if (fallbackMode && !sourceTokenIds[fallbackMode]) {
-    throw new Error(
-      `ORACLE_SOURCE_TOKEN_ID_${fallbackMode.toUpperCase()} is required when ORACLE_PRICING_MODE=${fallbackMode}`
     );
   }
 
@@ -216,7 +199,6 @@ export function loadConfig(
     oracleAddress: getAddress(wallet.address),
     rpcUrl: required(env, "ORACLE_RPC_URL"),
     contractAddress: getAddress(required(env, "ORACLE_CONTRACT_ADDRESS")),
-    fallbackMode,
     sourceTokenIds,
     coingeckoBaseUrl:
       env["ORACLE_COINGECKO_BASE_URL"] ?? "https://api.coingecko.com/api/v3",

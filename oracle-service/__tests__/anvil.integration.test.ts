@@ -12,14 +12,7 @@ import {
   Wallet,
 } from "ethers";
 
-import type { OracleServiceConfig } from "../src/config.js";
-import {
-  RpcGasPriceReader,
-  RpcOracleWriter,
-} from "../src/oracle.js";
-import type { PriceSource } from "../src/priceSource.js";
-import { TwapAggregator } from "../src/priceSource.js";
-import { runTick } from "../src/runner.js";
+import { RpcGasPriceReader, RpcOracleWriter } from "../src/oracle.js";
 import { usdToScaled } from "../src/scaling.js";
 
 // Gate: only run if foundry artifacts + anvil are available locally. Jest sets cwd to
@@ -122,27 +115,21 @@ maybe("oracle end-to-end against anvil", () => {
     if (anvil) await anvil.stop();
   });
 
-  it("pushes sourcePrice and per-chain PricingData via a real tick", async () => {
-    const config = {
-      sourceTokenIds: { penguinswap: "creditcoin-2" },
-      fallbackMode: "penguinswap",
-      chains: [
-        {
-          chainId: DST_CHAIN,
-          rpcUrl: anvil.rpcUrl,
-          coingeckoId: "ethereum",
-          priceBuffer: 750n,
-          baseFee: 1_000_000_000_000_000n,
-        },
-      ],
-    } as unknown as OracleServiceConfig;
-
-    const priceSource: PriceSource = {
-      fetchUsdPrices: async (ids) =>
-        new Map(
-          ids.map((id) => [id, id === "creditcoin-2" ? 0.5 : 3000] as const)
-        ),
-    };
+  it("pushes sourcePrice and per-chain PricingData to the real contract", async () => {
+    // This fixture deploys the current PenguinBridgeExecutionQuoter, which does not yet
+    // expose pricingMode() (that getter is the contract-side SMC-1681 work). So we
+    // exercise the write path — batchPriceUpdate ABI encoding, the tx, and on-chain
+    // state — directly via pushPrices rather than through runTick (which reads the
+    // mode). The mode read is covered against the real contract in the next test.
+    const chains = [
+      {
+        chainId: DST_CHAIN,
+        rpcUrl: anvil.rpcUrl,
+        coingeckoId: "ethereum",
+        priceBuffer: 750n,
+        baseFee: 1_000_000_000_000_000n,
+      },
+    ];
 
     const writer = new RpcOracleWriter({
       rpcUrl: anvil.rpcUrl,
@@ -150,42 +137,52 @@ maybe("oracle end-to-end against anvil", () => {
       signingKey: new Wallet(DEPLOYER_KEY).signingKey,
       staticNetwork: true,
     });
-    const gasReader = new RpcGasPriceReader(config.chains);
+    const gasReader = new RpcGasPriceReader(chains);
 
     try {
       // Boot check: the deployer key is the registered oracleService.
       await writer.assertAuthorized(new Wallet(DEPLOYER_KEY).address);
 
-      // The deployed quoter predates the SMC-1681 pricingMode() getter, so detection
-      // reports undefined and the tick prices under the configured fallback mode.
-      await expect(writer.pricingMode()).resolves.toBeUndefined();
+      const sourcePrice = usdToScaled(0.5);
+      const dstGasPrice = await gasReader.gasPrice(DST_CHAIN);
+      await writer.pushPrices(sourcePrice, [
+        {
+          chainId: DST_CHAIN,
+          pricing: {
+            dstPrice: usdToScaled(3000),
+            dstGasPrice,
+            priceBuffer: 750n,
+            baseFee: 1_000_000_000_000_000n,
+          },
+        },
+      ]);
 
-      const result = await runTick({
-        config,
-        priceSource,
-        twap: new TwapAggregator(0),
-        gasReader,
-        writer,
-      });
-
-      // On-chain state matches what the tick computed.
-      const onChainSource = (await quoterContract.sourcePrice()) as bigint;
-      expect(onChainSource).toBe(usdToScaled(0.5));
-      expect(result.sourcePrice).toBe(usdToScaled(0.5));
-
+      // On-chain state matches what we pushed.
+      expect((await quoterContract.sourcePrice()) as bigint).toBe(sourcePrice);
       const pd = await quoterContract.pricingData(DST_CHAIN);
       expect(pd.dstPrice).toBe(usdToScaled(3000));
-      expect(pd.dstGasPrice).toBeGreaterThan(0n);
+      expect(pd.dstGasPrice).toBe(dstGasPrice);
       expect(pd.priceBuffer).toBe(750n);
       expect(pd.baseFee).toBe(1_000_000_000_000_000n);
-
-      expect(result.mode).toBe("penguinswap");
-      expect(result.modeSource).toBe("config");
     } finally {
       writer.dispose();
       gasReader.dispose();
     }
   }, 60_000);
+
+  it("surfaces a clear error reading pricingMode() on a contract without the getter", async () => {
+    const writer = new RpcOracleWriter({
+      rpcUrl: anvil.rpcUrl,
+      contractAddress: quoterAddress,
+      signingKey: new Wallet(DEPLOYER_KEY).signingKey,
+      staticNetwork: true,
+    });
+    try {
+      await expect(writer.pricingMode()).rejects.toThrow(/not callable/);
+    } finally {
+      writer.dispose();
+    }
+  }, 30_000);
 
   it("times out waiting for a stuck transaction instead of hanging the loop", async () => {
     const writer = new RpcOracleWriter({
