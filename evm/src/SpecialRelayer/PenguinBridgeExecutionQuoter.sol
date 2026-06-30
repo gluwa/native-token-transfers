@@ -43,40 +43,55 @@ contract PenguinBridgeExecutionQuoter is IPenguinBridgeExecutionQuoter, Ownable2
 
     constructor() Ownable() {}
 
-    function setOracleService(address newOracleService) external onlyOwner {
+    function setOracleService(
+        address newOracleService
+    ) external onlyOwner {
         oracleService = newOracleService;
         emit OracleServiceSet(newOracleService);
     }
 
-    function setPayeeAddress(bytes32 newPayeeAddress) external onlyOwner {
+    function setPayeeAddress(
+        bytes32 newPayeeAddress
+    ) external onlyOwner {
         payeeAddress = newPayeeAddress;
         emit PayeeAddressSet(newPayeeAddress);
     }
 
-    function addQuoter(address quoter) external onlyOwner {
+    function addQuoter(
+        address quoter
+    ) external onlyOwner {
         authorizedQuoters[quoter] = true;
         emit QuoterAdded(quoter);
     }
 
-    function removeQuoter(address quoter) external onlyOwner {
+    function removeQuoter(
+        address quoter
+    ) external onlyOwner {
         authorizedQuoters[quoter] = false;
         emit QuoterRemoved(quoter);
     }
 
-    function isAuthorizedQuoter(address quoter) external view returns (bool) {
+    function isAuthorizedQuoter(
+        address quoter
+    ) external view returns (bool) {
         return authorizedQuoters[quoter];
     }
 
-    function priceUpdate(uint64 newSourcePrice, uint16 chainId, PricingData calldata price) external onlyOracleService {
+    function priceUpdate(
+        uint64 newSourcePrice,
+        uint16 chainId,
+        PricingData calldata price
+    ) external onlyOracleService {
         sourcePrice = newSourcePrice;
         pricingData[chainId] = price;
         emit PriceUpdated(newSourcePrice, chainId, price);
     }
 
-    function batchPriceUpdate(uint64 newSourcePrice, uint16[] calldata chainIds, PricingData[] calldata prices)
-        external
-        onlyOracleService
-    {
+    function batchPriceUpdate(
+        uint64 newSourcePrice,
+        uint16[] calldata chainIds,
+        PricingData[] calldata prices
+    ) external onlyOracleService {
         if (chainIds.length != prices.length) {
             revert LengthMismatch();
         }
@@ -105,7 +120,8 @@ contract PenguinBridgeExecutionQuoter is IPenguinBridgeExecutionQuoter, Ownable2
         bytes calldata requestBytes,
         bytes calldata relayInstructions
     ) external returns (uint256, bytes32, bytes32) {
-        uint256 requiredPayment = _quote(dstChain, _decodeUint256(requestBytes), _decodeUint256(relayInstructions));
+        uint256 requiredPayment =
+            _quote(dstChain, _decodeUint256(requestBytes), _decodeUint256(relayInstructions));
         emit ExecutionQuoteRequested(dstChain, requiredPayment);
         bytes32 payee = payeeAddress;
         if (payee == bytes32(0)) {
@@ -114,7 +130,11 @@ contract PenguinBridgeExecutionQuoter is IPenguinBridgeExecutionQuoter, Ownable2
         return (requiredPayment, payee, bytes32(0));
     }
 
-    function _quote(uint16 dstChain, uint256 msgValue, uint256 gasLimit) internal view returns (uint256) {
+    function _quote(
+        uint16 dstChain,
+        uint256 msgValue,
+        uint256 gasLimit
+    ) internal view returns (uint256) {
         uint256 srcPrice = sourcePrice;
         if (srcPrice == 0) {
             revert SourcePriceNotSet();
@@ -122,12 +142,14 @@ contract PenguinBridgeExecutionQuoter is IPenguinBridgeExecutionQuoter, Ownable2
         PricingData memory price = pricingData[dstChain];
         unchecked {
             uint256 fee = price.baseFee + gasLimit * price.dstGasPrice * price.dstPrice / srcPrice;
-            return msgValue * price.dstPrice / srcPrice
-                + fee * (BPS_DENOMINATOR + price.priceBuffer) / BPS_DENOMINATOR;
+            return msgValue * price.dstPrice / srcPrice + fee
+                * (BPS_DENOMINATOR + price.priceBuffer) / BPS_DENOMINATOR;
         }
     }
 
-    function _decodeUint256(bytes calldata encoded) internal pure returns (uint256 value) {
+    function _decodeUint256(
+        bytes calldata encoded
+    ) internal pure returns (uint256 value) {
         if (encoded.length < 32) {
             return 0;
         }

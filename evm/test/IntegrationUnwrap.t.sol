@@ -78,25 +78,26 @@ contract IntegrationUnwrap is IntegrationHelpers, IRateLimiterEvents {
             NttManagerWethUnwrap impl = new NttManagerWethUnwrap(
                 address(weth), IManagerBase.Mode.LOCKING, chainIdWctc, 1 days, false
             );
-            wctcManager = NttManagerWethUnwrap(
-                payable(address(new ERC1967Proxy(address(impl), "")))
-            );
+            wctcManager =
+                NttManagerWethUnwrap(payable(address(new ERC1967Proxy(address(impl), ""))));
             wctcManager.initialize();
 
             wormholeTransceiverChain1 = MockWormholeTransceiverContract(
-                address(new ERC1967Proxy(
-                    address(
-                        new MockWormholeTransceiverContract(
-                            address(wctcManager),
-                            address(wormhole),
-                            relayer,
-                            address(0),
-                            FAST_CONSISTENCY_LEVEL,
-                            GAS_LIMIT
-                        )
-                    ),
-                    ""
-                ))
+                address(
+                    new ERC1967Proxy(
+                        address(
+                            new MockWormholeTransceiverContract(
+                                address(wctcManager),
+                                address(wormhole),
+                                relayer,
+                                address(0),
+                                FAST_CONSISTENCY_LEVEL,
+                                GAS_LIMIT
+                            )
+                        ),
+                        ""
+                    )
+                )
             );
             wormholeTransceiverChain1.initialize();
 
@@ -118,25 +119,25 @@ contract IntegrationUnwrap is IntegrationHelpers, IRateLimiterEvents {
             MockNttManagerContract impl = new MockNttManagerContract(
                 address(bridgedToken), IManagerBase.Mode.BURNING, chainIdBridged, 1 days, false
             );
-            bridgedManager = MockNttManagerContract(
-                address(new ERC1967Proxy(address(impl), ""))
-            );
+            bridgedManager = MockNttManagerContract(address(new ERC1967Proxy(address(impl), "")));
             bridgedManager.initialize();
 
             wormholeTransceiverChain2 = MockWormholeTransceiverContract(
-                address(new ERC1967Proxy(
-                    address(
-                        new MockWormholeTransceiverContract(
-                            address(bridgedManager),
-                            address(wormhole),
-                            relayer,
-                            address(0),
-                            FAST_CONSISTENCY_LEVEL,
-                            GAS_LIMIT
-                        )
-                    ),
-                    ""
-                ))
+                address(
+                    new ERC1967Proxy(
+                        address(
+                            new MockWormholeTransceiverContract(
+                                address(bridgedManager),
+                                address(wormhole),
+                                relayer,
+                                address(0),
+                                FAST_CONSISTENCY_LEVEL,
+                                GAS_LIMIT
+                            )
+                        ),
+                        ""
+                    )
+                )
             );
             wormholeTransceiverChain2.initialize();
 
@@ -146,8 +147,7 @@ contract IntegrationUnwrap is IntegrationHelpers, IRateLimiterEvents {
                 packTrimmedAmount(type(uint64).max, 8).untrim(bridgedToken.decimals())
             );
             bridgedManager.setInboundLimit(
-                packTrimmedAmount(type(uint64).max, 8).untrim(bridgedToken.decimals()),
-                chainIdWctc
+                packTrimmedAmount(type(uint64).max, 8).untrim(bridgedToken.decimals()), chainIdWctc
             );
         }
 
@@ -202,7 +202,8 @@ contract IntegrationUnwrap is IntegrationHelpers, IRateLimiterEvents {
         // Capture and sign the emitted Wormhole message into an encoded VM (“VAA”).
         // NOTE: This uses a dev guardian key via WormholeSimulator.
         vm.chainId(chainIdWctc);
-        bytes[] memory encodedVMs = _getWormholeMessage(guardian, vm.getRecordedLogs(), chainIdBridged);
+        bytes[] memory encodedVMs =
+            _getWormholeMessage(guardian, vm.getRecordedLogs(), chainIdBridged);
         IWormhole.VM memory vaa = wormhole.parseVM(encodedVMs[0]);
 
         uint256 recipientEthBefore = userRecipient.balance;
@@ -226,9 +227,13 @@ contract IntegrationUnwrap is IntegrationHelpers, IRateLimiterEvents {
         // - manager WETH decreases
         // - user does NOT receive WETH
         // - manager does not retain ETH after forwarding
-        assertEq(userRecipient.balance, recipientEthBefore + amount, "recipient native not received");
         assertEq(
-            weth.balanceOf(address(wctcManager)), managerWethBefore - amount, "manager WETH not debited"
+            userRecipient.balance, recipientEthBefore + amount, "recipient native not received"
+        );
+        assertEq(
+            weth.balanceOf(address(wctcManager)),
+            managerWethBefore - amount,
+            "manager WETH not debited"
         );
         assertEq(weth.balanceOf(userRecipient), 0, "recipient should not get WETH");
         assertEq(address(wctcManager).balance, 0, "manager should not retain ETH");
@@ -272,7 +277,8 @@ contract IntegrationUnwrap is IntegrationHelpers, IRateLimiterEvents {
 
         // Capture and sign the emitted Wormhole message into an encoded VM (“VAA”).
         vm.chainId(chainIdWctc);
-        bytes[] memory encodedVMs = _getWormholeMessage(guardian, vm.getRecordedLogs(), chainIdBridged);
+        bytes[] memory encodedVMs =
+            _getWormholeMessage(guardian, vm.getRecordedLogs(), chainIdBridged);
         IWormhole.VM memory vaa = wormhole.parseVM(encodedVMs[0]);
 
         uint256 recipientEthBefore = userRecipient.balance;
@@ -283,9 +289,13 @@ contract IntegrationUnwrap is IntegrationHelpers, IRateLimiterEvents {
         wormholeTransceiverChain1.receiveMessage(encodedVMs[0]);
 
         // Assertions (same as relayer path):
-        assertEq(userRecipient.balance, recipientEthBefore + amount, "recipient native not received");
         assertEq(
-            weth.balanceOf(address(wctcManager)), managerWethBefore - amount, "manager WETH not debited"
+            userRecipient.balance, recipientEthBefore + amount, "recipient native not received"
+        );
+        assertEq(
+            weth.balanceOf(address(wctcManager)),
+            managerWethBefore - amount,
+            "manager WETH not debited"
         );
         assertEq(weth.balanceOf(userRecipient), 0, "recipient should not get WETH");
         assertEq(address(wctcManager).balance, 0, "manager should not retain ETH");
@@ -313,7 +323,8 @@ contract IntegrationUnwrap is IntegrationHelpers, IRateLimiterEvents {
         );
 
         vm.chainId(chainIdWctc);
-        bytes[] memory encodedVMs = _getWormholeMessage(guardian, vm.getRecordedLogs(), chainIdBridged);
+        bytes[] memory encodedVMs =
+            _getWormholeMessage(guardian, vm.getRecordedLogs(), chainIdBridged);
         IWormhole.VM memory vaa = wormhole.parseVM(encodedVMs[0]);
 
         bytes[] memory a;
@@ -352,7 +363,8 @@ contract IntegrationUnwrap is IntegrationHelpers, IRateLimiterEvents {
         );
 
         vm.chainId(chainIdWctc);
-        bytes[] memory encodedVMs = _getWormholeMessage(guardian, vm.getRecordedLogs(), chainIdBridged);
+        bytes[] memory encodedVMs =
+            _getWormholeMessage(guardian, vm.getRecordedLogs(), chainIdBridged);
         IWormhole.VM memory vaa = wormhole.parseVM(encodedVMs[0]);
 
         bytes[] memory a;

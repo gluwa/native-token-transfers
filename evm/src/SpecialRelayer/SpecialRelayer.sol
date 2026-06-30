@@ -38,7 +38,10 @@ contract SpecialRelayer is ISpecialRelayer, Ownable2Step, ReentrancyGuard {
     ///         contract verifies it matches the gasLimit committed in the signed quote, so
     ///         the relayer cannot under-deliver gas after the fee is collected.
     event ExecutionRequested(
-        uint16 indexed dstChain, bytes32 indexed dstAddr, bytes requestBytes, bytes relayInstructions
+        uint16 indexed dstChain,
+        bytes32 indexed dstAddr,
+        bytes requestBytes,
+        bytes relayInstructions
     );
 
     /// @notice Emitted when the execution quoter is updated.
@@ -82,11 +85,7 @@ contract SpecialRelayer is ISpecialRelayer, Ownable2Step, ReentrancyGuard {
         /* sourceContract */
         uint16 targetChain,
         uint256 /* additionalValue */
-    )
-        external
-        view
-        returns (uint256 nativePriceQuote)
-    {
+    ) external view returns (uint256 nativePriceQuote) {
         return _quoteDeliveryPrice(targetChain, 0, bytes32(0), new bytes(0));
     }
 
@@ -130,9 +129,11 @@ contract SpecialRelayer is ISpecialRelayer, Ownable2Step, ReentrancyGuard {
         emit ExecutionRequested(dstChain, dstAddr, requestBytes, relayInstructions);
     }
 
-    function _validateAndPay(uint16 dstChain, bytes calldata signedQuoteBytes, bytes calldata relayInstructions)
-        internal
-    {
+    function _validateAndPay(
+        uint16 dstChain,
+        bytes calldata signedQuoteBytes,
+        bytes calldata relayInstructions
+    ) internal {
         IPenguinBridgeExecutionQuoter executionQuoter = penguinBridgeExecutionQuoter;
         if (address(executionQuoter) == address(0)) {
             revert ExecutionQuoterNotSet();
@@ -199,7 +200,9 @@ contract SpecialRelayer is ISpecialRelayer, Ownable2Step, ReentrancyGuard {
         }
     }
 
-    function _parseSignedQuote(bytes memory signedQuoteBytes) internal pure returns (ParsedQuote memory q) {
+    function _parseSignedQuote(
+        bytes memory signedQuoteBytes
+    ) internal pure returns (ParsedQuote memory q) {
         if (signedQuoteBytes.length != SIGNED_QUOTE_LENGTH) {
             revert InvalidQuoteLength(signedQuoteBytes.length);
         }
@@ -233,7 +236,9 @@ contract SpecialRelayer is ISpecialRelayer, Ownable2Step, ReentrancyGuard {
         q.requiredPayment = requiredPayment;
     }
 
-    function _recoverQuoteSigner(bytes memory signedQuoteBytes) internal pure returns (address) {
+    function _recoverQuoteSigner(
+        bytes memory signedQuoteBytes
+    ) internal pure returns (address) {
         bytes32 hash;
         bytes32 r;
         bytes32 s;
@@ -249,7 +254,9 @@ contract SpecialRelayer is ISpecialRelayer, Ownable2Step, ReentrancyGuard {
     }
 
     /// @notice Set the canonical execution quoter that signs and prices executions.
-    function setExecutionQuoter(address executionQuoter) external onlyOwner {
+    function setExecutionQuoter(
+        address executionQuoter
+    ) external onlyOwner {
         penguinBridgeExecutionQuoter = IPenguinBridgeExecutionQuoter(executionQuoter);
         emit ExecutionQuoterSet(executionQuoter);
     }
@@ -257,7 +264,9 @@ contract SpecialRelayer is ISpecialRelayer, Ownable2Step, ReentrancyGuard {
     /// @notice Set the Wormhole chain id of the chain this relayer is deployed on.
     ///         Required before signed-quote execution requests will be accepted, since
     ///         the signed quote's srcChain must match this value.
-    function setSourceChainId(uint16 chainId) external onlyOwner {
+    function setSourceChainId(
+        uint16 chainId
+    ) external onlyOwner {
         sourceChainId = chainId;
         emit SourceChainIdSet(chainId);
     }
