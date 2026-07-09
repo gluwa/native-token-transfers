@@ -1,42 +1,41 @@
 # ntt-oracle-service
 
-Off-chain oracle that pushes ATTEST/native pricing to `PenguinBridgeExecutionQuoter`. It is the **sole writer** of on-chain prices — the contract gates `priceUpdate` / `batchPriceUpdate` behind `onlyOracleService`, and this service's signing key is that `oracleService`.
+Off-chain oracle that pushes ATTEST/native pricing to `USCRelayingQuoter` (the SMC-1681 quoter in the usc-write-ability-research repo). It is the **sole writer** of on-chain prices — the quoter gates `priceUpdate` / `batchPriceUpdate` behind `onlyOracle`, the `TWAPReader` gates `update()` the same way, and this service's signing key is the registered `oracleService` on both.
 
 ## What it does
 
 Every `ORACLE_PUSH_INTERVAL_MS` it runs one tick:
 
-1. **Reads the current pricing mode** from the contract's `pricingMode()` getter. This happens every tick because the owner can toggle modes on-chain at any time; if the read fails the tick is skipped.
-2. Fetches USD spot prices from **CoinGecko** (`/simple/price`) for the active mode's source token and every configured destination chain's native token, in a single request.
-3. Feeds each price into a rolling **time-weighted average** over `ORACLE_TWAP_WINDOW_MS` (the "TWAP pricing data" shared by both modes; falls back to spot until the window fills). Each sample is weighted by the interval it closes, so a fresh fetch influences the push immediately.
+1. **Reads the current pricing mode** from the quoter's `pricingMode()` getter. This happens every tick because the mode can be toggled on-chain at any time (via `setPricingMode`, itself an `onlyOracle` call); if the read fails the tick is skipped.
+2. Fetches USD spot prices from **CoinGecko** (`/simple/price`) in a single request: **CTC** (always), **ATTEST** (twap mode only), and every configured destination chain's native token.
+3. Feeds each price into a rolling **time-weighted average** over `ORACLE_TWAP_WINDOW_MS` (falls back to spot until the window fills). Each sample is weighted by the interval it closes, so a fresh fetch influences the push immediately.
 4. Reads current gas price from each destination chain's RPC.
-5. Writes `sourcePrice` + per-chain `PricingData {dstPrice, dstGasPrice, priceBuffer, baseFee}` in one `batchPriceUpdate` transaction. The receipt wait is bounded by `ORACLE_TX_WAIT_TIMEOUT_MS` so a stuck transaction can't hang the loop.
+5. **Twap mode only:** pushes a spot `ctcPerAttest` observation (`attestUsd / ctcUsd`, 1e18 fixed point) into the quoter's **`TWAPReader`** via `update()` — the reader address is re-read from the quoter each tick, so an owner-side `setTWAPReader()` rotation needs no restart.
+6. Writes `sourcePrice` (**CTC/USD ×1e10** — the mode-independent anchor) + per-chain `PricingData {baseFee, dstGasPrice, dstPrice, srcPrice, priceBuffer}` in one `batchPriceUpdate` transaction. `srcPrice` carries the same CTC/USD value per chain. Receipt waits are bounded by `ORACLE_TX_WAIT_TIMEOUT_MS` so a stuck transaction can't hang the loop.
 
-If any required price or gas read fails, the **whole tick is skipped** (logged) — the contract keeps its previous values rather than receiving partial/stale data.
+All reads (prices + gas) complete **before** anything is pushed: if any read fails, the whole tick is skipped (logged) and the contract keeps its previous values rather than receiving partial/stale data. In twap mode the reader push precedes the batch push; a spot observation is valid on its own, so a batch failure after it does no harm.
 
 ### Pricing modes
 
-The contract prices execution in the source-chain native token, **ATTEST**. `sourcePrice` is the USD price of ATTEST scaled by 1e10. The active mode selects which token's USD price is written there:
+The quoter derives the ATTEST↔native conversion rate (`getAttestPerNative`) from three legs: CTC/USD (`sourcePrice`), native/USD (`dstPrice`), and ATTEST/CTC (`ctcPerAttest`). The active mode — `pricingMode() view returns (uint8)` (`0` = twap, `1` = penguinswap) — selects **where ctcPerAttest comes from**:
 
-- **`twap`** — push **ATTEST/USD** (ATTEST has a direct USD market).
-- **`penguinswap`** — push **CTC/USD**; the contract derives ATTEST via the on-chain ATTEST/CTC PenguinSwap pool (see SMC-1681). Used at launch when ATTEST only trades against CTC.
+- **`twap`** — this service derives it off CoinGecko (`attestUsd / ctcUsd`) and accumulates it into the on-chain `TWAPReader`; the quoter reads the time-weighted average back via `twapReader.read()`. Requires `ORACLE_ATTEST_TOKEN_ID`.
+- **`penguinswap`** — the quoter reads it live from the ATTEST/CTC PenguinSwap (Uniswap-V3) pool path. No reader push, no ATTEST feed needed.
 
-Both modes also push each destination chain's native-token USD price as `dstPrice`.
+In **both** modes this service pushes CTC/USD as `sourcePrice`/`srcPrice` and native/USD as `dstPrice`. The quoter is the single source of truth for the mode — there is no env override. If the mode read fails (a transient RPC error, or a contract that doesn't expose the getter) the error is surfaced: the tick is skipped at runtime, and at startup the service refuses to boot. Mode toggles go through `setPricingMode(newMode, newSourcePrice)` — an `onlyOracle` call that re-anchors the CTC/USD price atomically (it rejects a zero price).
 
-The mode is read every tick from the contract's `pricingMode() view returns (uint8)` getter (`0` = twap, `1` = penguinswap), so an on-chain toggle takes effect on the next tick. The contract is the single source of truth — there is no env override. If the read fails (a transient RPC error, or a contract that doesn't expose the getter) the error is surfaced: the tick is skipped at runtime, and at startup the service refuses to boot. After a toggle the new source token starts a fresh window — first push is spot, then the TWAP re-accumulates.
-
-At startup the service reads `oracleService()` and refuses to run unless it equals the signing address, then reads `pricingMode()` once the same way a tick would and refuses to run if it can't (e.g. the contract isn't the expected quoter).
+At startup the service reads the quoter's `oracleService()` and refuses to run unless it equals the signing address, then reads `pricingMode()` once the same way a tick would. If the active mode is twap it additionally verifies the quoter's `TWAPReader` is configured and registers this key as **its** `oracleService` too.
 
 ## Prerequisites
 
 Before the service can push a single price, the following must be true:
 
-1. **`PenguinBridgeExecutionQuoter` is deployed** on the source chain and its address is `ORACLE_CONTRACT_ADDRESS`.
-2. **The contract owner has called `setOracleService(<oracle address>)`** with the address of `ORACLE_PRIVATE_KEY`. The service reads `oracleService()` at boot and exits non-zero if it doesn't match (pushing prices the contract would reject is worse than failing loudly).
-3. **The oracle wallet is funded with source-chain native token.** Every tick sends a `batchPriceUpdate` transaction, so the signing key needs gas. This is *not* checked at startup — an unfunded key simply skips every tick (logged), and the heartbeat goes stale.
-4. **Reachable RPCs**: the source-chain RPC (`ORACLE_RPC_URL`) plus **each destination chain's RPC** (`ORACLE_CHAINS[].rpcUrl`, read every tick for gas price).
-5. **The deployed quoter exposes `pricingMode()`** (the contract-side SMC-1681 work). The service reads it at boot and refuses to run otherwise — there is no env fallback.
-6. **Valid CoinGecko ids** for the source token of any mode the contract may be in, plus every destination chain's native token. At launch the contract is in `penguinswap` mode, so set `ORACLE_SOURCE_TOKEN_ID_PENGUINSWAP=<ctc coingecko id>`. CoinGecko's free tier works without a key.
+1. **`USCRelayingQuoter` is deployed** on the source chain and its address is `ORACLE_CONTRACT_ADDRESS`.
+2. **The quoter's `oracleService` is this key** — its constructor takes it, or the owner calls `setOracleService(<oracle address>)`. The service reads `oracleService()` at boot and exits non-zero on mismatch (pushing prices the contract would reject is worse than failing loudly).
+3. **For twap mode: the `TWAPReader`'s `oracleService` is ALSO this key.** The reader is a separate contract with its own oracle gate (constructor arg or `setOracleService`). Checked at boot when twap is the active mode; a later on-chain toggle to twap surfaces the same error per tick.
+4. **The oracle wallet is funded with source-chain native token.** Every tick sends one `batchPriceUpdate` (plus one `TWAPReader.update()` in twap mode), so the signing key needs gas. This is *not* checked at startup — an unfunded key simply skips every tick (logged), and the heartbeat goes stale.
+5. **Reachable RPCs**: the source-chain RPC (`ORACLE_RPC_URL`) plus **each destination chain's RPC** (`ORACLE_CHAINS[].rpcUrl`, read every tick for gas price).
+6. **Valid CoinGecko ids**: CTC (`ORACLE_CTC_TOKEN_ID`, always) and every destination chain's native token; plus ATTEST (`ORACLE_ATTEST_TOKEN_ID`) if the contract may be in twap mode. At launch ATTEST has no USD market, so the contract runs in `penguinswap` mode and the ATTEST id can be omitted. CoinGecko's free tier works without a key.
 
 ## Configuration
 
@@ -44,17 +43,17 @@ All config is via environment variables:
 
 | Variable                            | Required          | Default                              | Description                                                                 |
 | ----------------------------------- | ----------------- | ------------------------------------ | --------------------------------------------------------------------------- |
-| `ORACLE_PRIVATE_KEY`                | yes               |                                      | secp256k1 key whose address equals `oracleService`.                         |
+| `ORACLE_PRIVATE_KEY`                | yes               |                                      | secp256k1 key whose address equals `oracleService` (quoter + TWAPReader).   |
 | `ORACLE_RPC_URL`                    | yes               |                                      | Source-chain JSON-RPC URL (where the Quoter contract lives).                |
-| `ORACLE_CONTRACT_ADDRESS`           | yes               |                                      | `PenguinBridgeExecutionQuoter` address. Must expose `pricingMode()`.        |
-| `ORACLE_SOURCE_TOKEN_ID_TWAP`       | if twap reachable |                                      | CoinGecko id priced into `sourcePrice` in TWAP mode (ATTEST).               |
-| `ORACLE_SOURCE_TOKEN_ID_PENGUINSWAP`| if penguinswap reachable |                               | CoinGecko id priced into `sourcePrice` in PenguinSwap mode (CTC). At least one of the two ids must be set; set both if the contract may be toggled to either mode. |
+| `ORACLE_CONTRACT_ADDRESS`           | yes               |                                      | `USCRelayingQuoter` address. Must expose `pricingMode()`.                   |
+| `ORACLE_CTC_TOKEN_ID`               | yes               |                                      | CoinGecko id of CTC — the `sourcePrice`/`srcPrice` anchor in both modes.    |
+| `ORACLE_ATTEST_TOKEN_ID`            | if twap reachable |                                      | CoinGecko id of ATTEST — twap mode derives ctcPerAttest from it. Ticks that find the contract in twap mode without it are skipped; startup aborts. |
 | `ORACLE_CHAINS`                     | yes               |                                      | JSON array of destination chains (see below).                              |
 | `ORACLE_COINGECKO_BASE_URL`         | no                | `https://api.coingecko.com/api/v3`   | CoinGecko REST base. Use the pro host for a pro key.                        |
 | `ORACLE_COINGECKO_API_KEY`          | no                |                                      | Sent as `x-cg-demo-api-key` (or `x-cg-pro-api-key` for the pro host).       |
 | `ORACLE_PUSH_INTERVAL_MS`           | no                | `60000`                              | Interval between pushes. Minimum `15000` (15s).                             |
 | `ORACLE_TWAP_WINDOW_MS`             | no                | `300000`                             | Rolling time-weighting window. `0` disables weighting (push spot).          |
-| `ORACLE_TX_WAIT_TIMEOUT_MS`         | no                | `120000`                             | Max wait for the `batchPriceUpdate` receipt before the tick fails.          |
+| `ORACLE_TX_WAIT_TIMEOUT_MS`         | no                | `120000`                             | Max wait per receipt before the tick fails.                                 |
 | `ORACLE_HEARTBEAT_FILE`             | no                |                                      | File touched after each successful push, for the container healthcheck.     |
 | `ORACLE_RPC_MAX_ATTEMPTS`           | no                | `3`                                  | Total RPC/CoinGecko attempts including the first (1 disables retry).        |
 | `ORACLE_RPC_INITIAL_DELAY_MS`       | no                | `200`                                | First backoff; doubles each attempt up to `MAX_DELAY_MS`.                   |
@@ -72,10 +71,10 @@ All config is via environment variables:
 - `chainId` — Wormhole chain id (uint16); a JSON number.
 - `rpcUrl` — destination-chain RPC, read for current gas price.
 - `coingeckoId` — CoinGecko id of the native token.
-- `priceBuffer` — per-chain upward adjustment in basis points (uint64). **Decimal string**; omit for 0.
-- `baseFee` — flat fee in source-chain native wei (uint64). **Decimal string** (wei values exceed JS's safe integer range — a bare number would lose precision); omit for 0.
+- `priceBuffer` — per-chain upward adjustment in **parts per 100,000** (the contract's `BPS_DENOMINATOR = 100_000`, so `"500"` = +0.5%). uint16 on-chain, max `65535` (+65.5%). **Decimal string**; omit for 0.
+- `baseFee` — flat fee in **CTC wei** (uint256 — values above uint64 like 100 CTC = 1e20 are fine). **Decimal string** (wei values exceed JS's safe integer range — a bare number would lose precision); omit for 0.
 
-Retry only kicks in for transient failures (RPC `NETWORK_ERROR`/`SERVER_ERROR`/`TIMEOUT`, CoinGecko 5xx/429, transport errors). Contract reverts and CoinGecko 4xx are not retried. The `batchPriceUpdate` send itself is **not** retried within a tick — a transient failure simply skips to the next interval, which overwrites prices anyway, so there is no double-submission risk. Waiting for the receipt is bounded by `ORACLE_TX_WAIT_TIMEOUT_MS` so a transaction stuck in the mempool fails the tick instead of freezing the loop; the next tick reuses the stuck transaction's nonce, bumping fees ≥12.5% over the stuck tx (or to current market, whichever is higher) so the node accepts the replacement even when gas hasn't moved. The per-tick `pricingMode()` read is covered by the same retry policy; if it still fails, the tick is skipped rather than priced under a guessed mode.
+Retry only kicks in for transient failures (RPC `NETWORK_ERROR`/`SERVER_ERROR`/`TIMEOUT`, CoinGecko 5xx/429, transport errors). Contract reverts and CoinGecko 4xx are not retried. The tick's sends (`TWAPReader.update`, `batchPriceUpdate`) are **not** retried within a tick — a transient failure simply skips to the next interval, which overwrites prices anyway, so there is no double-submission risk. Waiting for a receipt is bounded by `ORACLE_TX_WAIT_TIMEOUT_MS` so a transaction stuck in the mempool fails the tick instead of freezing the loop; the next send reuses the stuck transaction's nonce, bumping fees ≥12.5% over the stuck tx (or to current market, whichever is higher) so the node accepts the replacement even when gas hasn't moved. The per-tick `pricingMode()` read is covered by the same retry policy; if it still fails, the tick is skipped rather than priced under a guessed mode.
 
 ## Development
 
@@ -83,7 +82,7 @@ Retry only kicks in for transient failures (RPC `NETWORK_ERROR`/`SERVER_ERROR`/`
 # from the repo root
 npm install --workspace=oracle-service
 
-# unit tests (anvil-based integration auto-skips if anvil / evm/out artifacts aren't present)
+# unit tests + anvil-based integration (integration auto-skips if anvil isn't installed)
 npm test --workspace=oracle-service
 
 # typecheck / build
@@ -93,6 +92,8 @@ npm run build --workspace=oracle-service
 # run locally (env vars required)
 npm run dev --workspace=oracle-service
 ```
+
+The integration tests deploy the **real** `USCRelayingQuoter` + `TWAPReader` bytecode, vendored from the usc-write-ability-research repo into `__tests__/fixtures/` (trimmed hardhat artifacts). When those contracts change, recompile there (`npx hardhat compile`) and re-vendor the `abi`/`bytecode` fields.
 
 ## Deployment (Docker / Azure)
 
@@ -121,9 +122,9 @@ This is a **background worker**: it opens no socket, exposes no port, and serves
 
 ## Tests
 
-- `scaling.test.ts` — USD→uint64 1e10 scaling, rounding, range guards.
-- `config.test.ts` — env validation, `ORACLE_CHAINS` parsing (string-only amounts), source-token-id requirement, retry bounds, empty-env handling.
+- `scaling.test.ts` — USD→uint64 1e10 scaling, rounding, range guards, uint16 guard, the ctcPerAttest wad ratio.
+- `config.test.ts` — env validation, `ORACLE_CHAINS` parsing (string-only amounts, uint16 priceBuffer, uint256 baseFee), CTC/ATTEST token ids, interval floor, retry bounds.
 - `priceSource.test.ts` — CoinGecko client against a mock HTTP server (retry on 5xx/429, no retry on 4xx, missing-id rejection) and the TWAP windowing math.
-- `oracle.test.ts` — mock JSON-RPC: `batchPriceUpdate` calldata, `oracleService` auth check, `pricingMode()` mapping + clear error when the getter is absent + transient retry, gas-price read.
-- `runner.test.ts` — single tick with stubs: per-tick mode read (incl. on-chain toggle), correct `sourcePrice` token per mode, `PricingData` assembly, skip on mode-read/price/gas failure; `readActiveMode` behavior.
-- `anvil.integration.test.ts` — spawns `anvil`, deploys `PenguinBridgeExecutionQuoter`, sets the oracle, pushes prices via the real contract and asserts on-chain `sourcePrice` / `pricingData`; asserts a clear error from `pricingMode()` against a contract without the getter; asserts the bounded receipt wait times out against a non-mining node. Auto-skips when `anvil` or `evm/out` artifacts aren't present.
+- `oracle.test.ts` — mock JSON-RPC: `batchPriceUpdate` calldata in the real `PricingData` layout, `oracleService` auth check, `pricingMode()` mapping + clear error when the getter is absent + transient retry, unset-TWAPReader error, gas-price read.
+- `runner.test.ts` — single tick with stubs: per-tick mode read (incl. on-chain toggle), CTC anchor + per-chain `srcPrice` in both modes, TWAPReader push only under twap, skip on mode-read/missing-ATTEST-id/price/gas failure; `readActiveMode` behavior.
+- `anvil.integration.test.ts` — spawns `anvil`, deploys the **real** `USCRelayingQuoter` + `TWAPReader` (vendored bytecode), runs full `runTick`s in both modes and asserts on-chain `sourcePrice` / `pricingData` / reader state — including that the quoter derives the expected `getAttestUsdPrice()` from the pushed legs; asserts a clear error from `pricingMode()` against a contract without the getter; asserts the bounded receipt wait times out against a non-mining node and that the follow-up push replaces the stuck tx with bumped fees. Auto-skips when `anvil` isn't installed.

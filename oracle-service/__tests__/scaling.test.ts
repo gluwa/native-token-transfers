@@ -1,4 +1,11 @@
-import { PRICE_SCALE, assertUint64, usdToScaled } from "../src/scaling.js";
+import {
+  PRICE_SCALE,
+  WAD,
+  assertUint16,
+  assertUint64,
+  usdRatioWad,
+  usdToScaled,
+} from "../src/scaling.js";
 
 describe("usdToScaled", () => {
   it("scales whole and fractional USD prices by 1e10", () => {
@@ -44,5 +51,38 @@ describe("assertUint64", () => {
   it("rejects negative and over-range values", () => {
     expect(() => assertUint64(-1n, "x")).toThrow();
     expect(() => assertUint64(2n ** 64n, "x")).toThrow();
+  });
+});
+
+describe("assertUint16", () => {
+  it("passes values within range", () => {
+    expect(assertUint16(0n, "x")).toBe(0n);
+    expect(assertUint16(65_535n, "x")).toBe(65_535n);
+  });
+
+  it("rejects negative and over-range values", () => {
+    expect(() => assertUint16(-1n, "x")).toThrow();
+    expect(() => assertUint16(65_536n, "x")).toThrow(/uint16/);
+  });
+});
+
+describe("usdRatioWad", () => {
+  it("computes ctcPerAttest = attestUsd / ctcUsd in 1e18 fixed point", () => {
+    // 1 ATTEST = 10,000,000 CTC: attest $5,000,000 / ctc $0.50.
+    expect(usdRatioWad(5_000_000, 0.5)).toBe(10n ** 25n);
+    expect(usdRatioWad(1, 1)).toBe(WAD);
+    // Sub-unit ratios keep precision: 0.5 / 2 = 0.25.
+    expect(usdRatioWad(0.5, 2)).toBe(WAD / 4n);
+  });
+
+  it("carries the full 1e10 input precision", () => {
+    expect(usdRatioWad("1.0000000001", 1)).toBe(1_000_000_000_100_000_000n);
+  });
+
+  it("rejects non-positive legs and zero ratios", () => {
+    expect(() => usdRatioWad(0, 1)).toThrow();
+    expect(() => usdRatioWad(1, 0)).toThrow();
+    // Numerator so small the wad ratio truncates to zero.
+    expect(() => usdRatioWad("0.0000000001", "1800000000")).toThrow(/zero/);
   });
 });

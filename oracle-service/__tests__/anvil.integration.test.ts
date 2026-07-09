@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 
 import {
@@ -12,21 +12,22 @@ import {
   Wallet,
 } from "ethers";
 
+import type { OracleServiceConfig } from "../src/config.js";
 import { RpcGasPriceReader, RpcOracleWriter } from "../src/oracle.js";
-import { usdToScaled } from "../src/scaling.js";
+import type { PriceSource } from "../src/priceSource.js";
+import { TwapAggregator } from "../src/priceSource.js";
+import { runTick } from "../src/runner.js";
+import { usdRatioWad, usdToScaled } from "../src/scaling.js";
 
-// Gate: only run if foundry artifacts + anvil are available locally. Jest sets cwd to
-// the workspace dir (oracle-service/), so artifacts live one level up.
-const REPO_ROOT = resolvePath(process.cwd(), "..");
-const QUOTER_ARTIFACT = resolvePath(
-  REPO_ROOT,
-  "evm/out/PenguinBridgeExecutionQuoter.sol/PenguinBridgeExecutionQuoter.json"
-);
-const ARTIFACTS_PRESENT = existsSync(QUOTER_ARTIFACT);
+// The real USCRelayingQuoter + TWAPReader artifacts are vendored from the
+// usc-write-ability-research repo (see fixtures/*.json), so the only gate is anvil.
 const ANVIL_AVAILABLE = spawnSync("which", ["anvil"]).status === 0;
-const maybe = ARTIFACTS_PRESENT && ANVIL_AVAILABLE ? describe : describe.skip;
+const maybe = ANVIL_AVAILABLE ? describe : describe.skip;
 
-// Anvil's first default account (funded, deterministic) — acts as the oracleService.
+const FIXTURES = resolvePath(process.cwd(), "__tests__/fixtures");
+
+// Anvil's first default account (funded, deterministic) — acts as the oracleService
+// (and contract owner).
 const DEPLOYER_KEY =
   "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
@@ -75,53 +76,37 @@ async function startAnvil(): Promise<AnvilHandle> {
   throw new Error(`anvil failed to start on ${rpcUrl}`);
 }
 
-function loadArtifact(path: string): { abi: InterfaceAbi; bytecode: string } {
-  const j = JSON.parse(readFileSync(path, "utf-8")) as {
-    abi: InterfaceAbi;
-    bytecode: { object: string };
-  };
-  return { abi: j.abi, bytecode: j.bytecode.object };
+function loadArtifact(name: string): { abi: InterfaceAbi; bytecode: string } {
+  const j = JSON.parse(
+    readFileSync(resolvePath(FIXTURES, `${name}.json`), "utf-8")
+  ) as { abi: InterfaceAbi; bytecode: string };
+  return { abi: j.abi, bytecode: j.bytecode };
 }
 
-maybe("oracle end-to-end against anvil", () => {
-  const DST_CHAIN = 5;
-  let anvil: AnvilHandle;
-  let provider: JsonRpcProvider;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let quoterContract: any;
-  let quoterAddress: string;
+function stubPriceSource(prices: Record<string, number>): PriceSource {
+  return {
+    fetchUsdPrices: async (ids: string[]) =>
+      new Map(ids.map((id) => [id, prices[id]!])),
+  };
+}
 
-  beforeAll(async () => {
-    anvil = await startAnvil();
-    provider = new JsonRpcProvider(anvil.rpcUrl, Network.from(31337), {
-      staticNetwork: true,
-    });
-    const deployer = new NonceManager(new Wallet(DEPLOYER_KEY, provider));
-    const art = loadArtifact(QUOTER_ARTIFACT);
-    const factory = new ContractFactory(art.abi, art.bytecode, deployer);
-    const quoter = await factory.deploy();
-    await quoter.waitForDeployment();
-    quoterAddress = await quoter.getAddress();
-    quoterContract = new Contract(quoterAddress, art.abi, deployer);
+maybe(
+  "oracle end-to-end against anvil (USCRelayingQuoter + TWAPReader)",
+  () => {
+    const DST_CHAIN = 5;
+    const ORACLE_ADDR = new Wallet(DEPLOYER_KEY).address;
+    let anvil: AnvilHandle;
+    let provider: JsonRpcProvider;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let quoterContract: any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let twapReaderContract: any;
+    let quoterAddress: string;
+    let twapReaderAddress: string;
+    let writer: RpcOracleWriter;
+    let deployer: NonceManager;
 
-    // The oracle service is the deployer key.
-    await (
-      await quoterContract.setOracleService(new Wallet(DEPLOYER_KEY).address)
-    ).wait();
-  }, 30_000);
-
-  afterAll(async () => {
-    if (provider) provider.destroy();
-    if (anvil) await anvil.stop();
-  });
-
-  it("pushes sourcePrice and per-chain PricingData to the real contract", async () => {
-    // This fixture deploys the current PenguinBridgeExecutionQuoter, which does not yet
-    // expose pricingMode() (that getter is the contract-side SMC-1681 work). So we
-    // exercise the write path — batchPriceUpdate ABI encoding, the tx, and on-chain
-    // state — directly via pushPrices rather than through runTick (which reads the
-    // mode). The mode read is covered against the real contract in the next test.
-    const chains = [
+    const chains = () => [
       {
         chainId: DST_CHAIN,
         rpcUrl: anvil.rpcUrl,
@@ -131,120 +116,243 @@ maybe("oracle end-to-end against anvil", () => {
       },
     ];
 
-    const writer = new RpcOracleWriter({
-      rpcUrl: anvil.rpcUrl,
-      contractAddress: quoterAddress,
-      signingKey: new Wallet(DEPLOYER_KEY).signingKey,
-      staticNetwork: true,
+    const tickConfig = (): OracleServiceConfig =>
+      ({
+        oracleAddress: ORACLE_ADDR,
+        ctcTokenId: "creditcoin-2",
+        attestTokenId: "attestcoin",
+        chains: chains(),
+        pushIntervalMs: 60_000,
+      }) as unknown as OracleServiceConfig;
+
+    beforeAll(async () => {
+      anvil = await startAnvil();
+      provider = new JsonRpcProvider(anvil.rpcUrl, Network.from(31337), {
+        staticNetwork: true,
+      });
+      // NonceManager pins the deploy sequence's nonces locally. The writer under test
+      // sends its own txs from the same key, so any later owner-side tx must reset()
+      // the manager first (see the penguinswap test).
+      deployer = new NonceManager(new Wallet(DEPLOYER_KEY, provider));
+
+      // TWAPReader(initialOwner, oracleService) first, then
+      // USCRelayingQuoter(initialOwner, twapReader, oracleService).
+      const readerArt = loadArtifact("TWAPReader");
+      const reader = await new ContractFactory(
+        readerArt.abi,
+        readerArt.bytecode,
+        deployer
+      ).deploy(ORACLE_ADDR, ORACLE_ADDR);
+      await reader.waitForDeployment();
+      twapReaderAddress = await reader.getAddress();
+      twapReaderContract = new Contract(
+        twapReaderAddress,
+        readerArt.abi,
+        deployer
+      );
+
+      const quoterArt = loadArtifact("USCRelayingQuoter");
+      const quoter = await new ContractFactory(
+        quoterArt.abi,
+        quoterArt.bytecode,
+        deployer
+      ).deploy(ORACLE_ADDR, twapReaderAddress, ORACLE_ADDR);
+      await quoter.waitForDeployment();
+      quoterAddress = await quoter.getAddress();
+      quoterContract = new Contract(quoterAddress, quoterArt.abi, deployer);
+
+      writer = new RpcOracleWriter({
+        rpcUrl: anvil.rpcUrl,
+        contractAddress: quoterAddress,
+        signingKey: new Wallet(DEPLOYER_KEY).signingKey,
+        staticNetwork: true,
+      });
+    }, 30_000);
+
+    afterAll(async () => {
+      if (writer) writer.dispose();
+      if (provider) provider.destroy();
+      if (anvil) await anvil.stop();
     });
-    const gasReader = new RpcGasPriceReader(chains);
 
-    try {
-      // Boot check: the deployer key is the registered oracleService.
-      await writer.assertAuthorized(new Wallet(DEPLOYER_KEY).address);
+    it("passes the boot checks against the real contracts", async () => {
+      await writer.assertAuthorized(ORACLE_ADDR);
+      await writer.assertTwapReaderAuthorized(ORACLE_ADDR);
+      // The quoter deploys in TWAP mode (enum default 0).
+      await expect(writer.pricingMode()).resolves.toBe("twap");
+    });
 
-      const sourcePrice = usdToScaled(0.5);
-      const dstGasPrice = await gasReader.gasPrice(DST_CHAIN);
-      await writer.pushPrices(sourcePrice, [
+    it("runs a full twap-mode tick: CTC anchor + PricingData on the quoter, ctcPerAttest on the TWAPReader", async () => {
+      const gasReader = new RpcGasPriceReader(chains());
+      try {
+        const result = await runTick({
+          config: tickConfig(),
+          priceSource: stubPriceSource({
+            "creditcoin-2": 0.5,
+            attestcoin: 5_000_000,
+            ethereum: 3000,
+          }),
+          twap: new TwapAggregator(0),
+          gasReader,
+          writer,
+        });
+
+        expect(result.mode).toBe("twap");
+        const expectedAnchor = usdToScaled(0.5);
+        expect(result.sourcePrice).toBe(expectedAnchor);
+
+        // Quoter state: mode-independent CTC/USD anchor + per-chain PricingData in the
+        // real struct layout.
+        expect((await quoterContract.sourcePrice()) as bigint).toBe(
+          expectedAnchor
+        );
+        const pd = await quoterContract.pricingData(DST_CHAIN);
+        expect(pd.baseFee).toBe(1_000_000_000_000_000n);
+        expect(pd.dstGasPrice).toBe(result.updates[0]!.pricing.dstGasPrice);
+        expect(pd.dstPrice).toBe(usdToScaled(3000));
+        expect(pd.srcPrice).toBe(expectedAnchor);
+        expect(pd.priceBuffer).toBe(750n);
+
+        // TWAPReader state: the tick pushed spot ctcPerAttest = 5e6 / 0.5 = 1e7 ATTEST
+        // priced in CTC, 1e18 fp.
+        const expectedRatio = usdRatioWad(5_000_000, 0.5);
+        expect(result.ctcPerAttest).toBe(expectedRatio);
+        expect((await twapReaderContract.lastPrice()) as bigint).toBe(
+          expectedRatio
+        );
+
+        // With the anchor and the reader sample in place, the quoter can derive
+        // ATTEST/USD: sourcePrice × ctcPerAttest / 1e18 (= 5e6 USD ×1e10).
+        expect((await quoterContract.getAttestUsdPrice()) as bigint).toBe(
+          usdToScaled(5_000_000)
+        );
+      } finally {
+        gasReader.dispose();
+      }
+    }, 60_000);
+
+    it("a penguinswap-mode tick pushes prices but no TWAPReader sample", async () => {
+      // Toggle on-chain — setPricingMode is onlyOracle and re-anchors atomically.
+      // The writer has sent txs from this key since deployment; resync the manager.
+      deployer.reset();
+      await (await quoterContract.setPricingMode(1, usdToScaled(0.4))).wait();
+
+      const readerTsBefore =
+        (await twapReaderContract.lastTimestamp()) as bigint;
+      const gasReader = new RpcGasPriceReader(chains());
+      try {
+        const result = await runTick({
+          config: tickConfig(),
+          priceSource: stubPriceSource({
+            "creditcoin-2": 0.6,
+            ethereum: 3100,
+          }),
+          twap: new TwapAggregator(0),
+          gasReader,
+          writer,
+        });
+
+        expect(result.mode).toBe("penguinswap");
+        expect(result.twapTxHash).toBeUndefined();
+        expect((await quoterContract.sourcePrice()) as bigint).toBe(
+          usdToScaled(0.6)
+        );
+        const pd = await quoterContract.pricingData(DST_CHAIN);
+        expect(pd.dstPrice).toBe(usdToScaled(3100));
+        expect(pd.srcPrice).toBe(usdToScaled(0.6));
+        // No reader write happened.
+        expect((await twapReaderContract.lastTimestamp()) as bigint).toBe(
+          readerTsBefore
+        );
+      } finally {
+        gasReader.dispose();
+      }
+    }, 60_000);
+
+    it("surfaces a clear error reading pricingMode() on a contract without the getter", async () => {
+      // The TWAPReader exposes no pricingMode() — a stand-in for pointing the service
+      // at the wrong contract.
+      const wrongTarget = new RpcOracleWriter({
+        rpcUrl: anvil.rpcUrl,
+        contractAddress: twapReaderAddress,
+        signingKey: new Wallet(DEPLOYER_KEY).signingKey,
+        staticNetwork: true,
+      });
+      try {
+        await expect(wrongTarget.pricingMode()).rejects.toThrow(/not callable/);
+      } finally {
+        wrongTarget.dispose();
+      }
+    }, 30_000);
+
+    it("times out on a stuck transaction, then replaces it with bumped fees", async () => {
+      const stuckWriter = new RpcOracleWriter({
+        rpcUrl: anvil.rpcUrl,
+        contractAddress: quoterAddress,
+        signingKey: new Wallet(DEPLOYER_KEY).signingKey,
+        staticNetwork: true,
+        txWaitTimeoutMs: 1_000,
+      });
+      const updates = (dstPrice: bigint) => [
         {
           chainId: DST_CHAIN,
           pricing: {
-            dstPrice: usdToScaled(3000),
-            dstGasPrice,
-            priceBuffer: 750n,
-            baseFee: 1_000_000_000_000_000n,
+            baseFee: 0n,
+            dstGasPrice: 1n,
+            dstPrice,
+            srcPrice: usdToScaled(0.5),
+            priceBuffer: 0n,
           },
         },
-      ]);
+      ];
+      try {
+        // With automine off the tx is accepted into the pool but never mined — the
+        // bounded wait must reject instead of blocking the push loop forever.
+        await provider.send("anvil_setAutomine", [false]);
+        await expect(
+          stuckWriter.pushPrices(usdToScaled(0.5), updates(usdToScaled(3000)))
+        ).rejects.toMatchObject({ code: "TIMEOUT" });
 
-      // On-chain state matches what we pushed.
-      expect((await quoterContract.sourcePrice()) as bigint).toBe(sourcePrice);
-      const pd = await quoterContract.pricingData(DST_CHAIN);
-      expect(pd.dstPrice).toBe(usdToScaled(3000));
-      expect(pd.dstGasPrice).toBe(dstGasPrice);
-      expect(pd.priceBuffer).toBe(750n);
-      expect(pd.baseFee).toBe(1_000_000_000_000_000n);
-    } finally {
-      writer.dispose();
-      gasReader.dispose();
-    }
-  }, 60_000);
+        // Exactly one tx pending (the stuck one).
+        const latest = await provider.getTransactionCount(
+          ORACLE_ADDR,
+          "latest"
+        );
+        const pending = await provider.getTransactionCount(
+          ORACLE_ADDR,
+          "pending"
+        );
+        expect(pending).toBe(latest + 1);
 
-  it("surfaces a clear error reading pricingMode() on a contract without the getter", async () => {
-    const writer = new RpcOracleWriter({
-      rpcUrl: anvil.rpcUrl,
-      contractAddress: quoterAddress,
-      signingKey: new Wallet(DEPLOYER_KEY).signingKey,
-      staticNetwork: true,
-    });
-    try {
-      await expect(writer.pricingMode()).rejects.toThrow(/not callable/);
-    } finally {
-      writer.dispose();
-    }
-  }, 30_000);
+        // The next push must reuse the stuck tx's nonce with fees bumped ≥12.5%, so
+        // the node ACCEPTS the replacement even though market gas hasn't moved (a
+        // same-fee resend would be rejected as underpriced). It can't mine either, so
+        // it also times out — but it must not queue a second tx behind the first.
+        await expect(
+          stuckWriter.pushPrices(usdToScaled(0.6), updates(usdToScaled(3000)))
+        ).rejects.toMatchObject({ code: "TIMEOUT" });
+        const pendingAfter = await provider.getTransactionCount(
+          ORACLE_ADDR,
+          "pending"
+        );
+        expect(pendingAfter).toBe(latest + 1);
 
-  it("times out on a stuck transaction, then replaces it with bumped fees", async () => {
-    const writer = new RpcOracleWriter({
-      rpcUrl: anvil.rpcUrl,
-      contractAddress: quoterAddress,
-      signingKey: new Wallet(DEPLOYER_KEY).signingKey,
-      staticNetwork: true,
-      txWaitTimeoutMs: 1_000,
-    });
-    const updates = [
-      {
-        chainId: DST_CHAIN,
-        pricing: {
-          dstPrice: usdToScaled(3000),
-          dstGasPrice: 1n,
-          priceBuffer: 0n,
-          baseFee: 0n,
-        },
-      },
-    ];
-    const oracleAddr = new Wallet(DEPLOYER_KEY).address;
-    try {
-      // With automine off the tx is accepted into the pool but never mined — the
-      // bounded wait must reject instead of blocking the push loop forever.
-      await provider.send("anvil_setAutomine", [false]);
-      await expect(
-        writer.pushPrices(usdToScaled(0.5), updates)
-      ).rejects.toMatchObject({ code: "TIMEOUT" });
-
-      // Exactly one tx pending (the stuck one).
-      const latest = await provider.getTransactionCount(oracleAddr, "latest");
-      const pending = await provider.getTransactionCount(oracleAddr, "pending");
-      expect(pending).toBe(latest + 1);
-
-      // The next push must reuse the stuck tx's nonce with fees bumped ≥12.5%, so
-      // the node ACCEPTS the replacement even though market gas hasn't moved (a
-      // same-fee resend would be rejected as underpriced). It can't mine either, so
-      // it also times out — but it must not queue a second tx behind the first.
-      await expect(
-        writer.pushPrices(usdToScaled(0.6), updates)
-      ).rejects.toMatchObject({ code: "TIMEOUT" });
-      const pendingAfter = await provider.getTransactionCount(
-        oracleAddr,
-        "pending"
-      );
-      expect(pendingAfter).toBe(latest + 1);
-
-      // Mining now lands exactly one tx — the bumped replacement, carrying the
-      // second push's prices.
-      await provider.send("anvil_setAutomine", [true]);
-      await provider.send("evm_mine", []);
-      expect(await provider.getTransactionCount(oracleAddr, "latest")).toBe(
-        latest + 1
-      );
-      expect((await quoterContract.sourcePrice()) as bigint).toBe(
-        usdToScaled(0.6)
-      );
-    } finally {
-      await provider.send("anvil_setAutomine", [true]);
-      // Flush any stranded tx so it can't bleed into other tests.
-      await provider.send("evm_mine", []);
-      writer.dispose();
-    }
-  }, 30_000);
-});
+        // Mining now lands exactly one tx — the bumped replacement, carrying the
+        // second push's prices.
+        await provider.send("anvil_setAutomine", [true]);
+        await provider.send("evm_mine", []);
+        expect(await provider.getTransactionCount(ORACLE_ADDR, "latest")).toBe(
+          latest + 1
+        );
+        expect((await quoterContract.sourcePrice()) as bigint).toBe(
+          usdToScaled(0.6)
+        );
+      } finally {
+        await provider.send("anvil_setAutomine", [true]);
+        // Flush any stranded tx so it can't bleed into other tests.
+        await provider.send("evm_mine", []);
+        stuckWriter.dispose();
+      }
+    }, 30_000);
+  }
+);

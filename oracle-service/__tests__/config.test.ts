@@ -19,7 +19,7 @@ function baseEnv(): NodeJS.ProcessEnv {
     ORACLE_PRIVATE_KEY,
     ORACLE_RPC_URL: "http://rpc.test",
     ORACLE_CONTRACT_ADDRESS: "0x" + "1".repeat(40),
-    ORACLE_SOURCE_TOKEN_ID_PENGUINSWAP: "creditcoin-2",
+    ORACLE_CTC_TOKEN_ID: "creditcoin-2",
     ORACLE_CHAINS: CHAINS,
   };
 }
@@ -28,7 +28,8 @@ describe("loadConfig", () => {
   it("loads defaults for optional fields", () => {
     const cfg = loadConfig(baseEnv());
     expect(cfg.oracleAddress).toBe(ORACLE_ADDRESS);
-    expect(cfg.sourceTokenIds).toEqual({ penguinswap: "creditcoin-2" });
+    expect(cfg.ctcTokenId).toBe("creditcoin-2");
+    expect(cfg.attestTokenId).toBeUndefined();
     expect(cfg.coingeckoBaseUrl).toBe("https://api.coingecko.com/api/v3");
     expect(cfg.coingeckoApiKey).toBeUndefined();
     expect(cfg.pushIntervalMs).toBe(60_000);
@@ -52,21 +53,19 @@ describe("loadConfig", () => {
     expect(c.baseFee).toBe(1_000_000_000_000_000n);
   });
 
-  it("collects source token ids for whichever modes are configured", () => {
+  it("collects the optional ATTEST token id", () => {
     const cfg = loadConfig({
       ...baseEnv(),
-      ORACLE_SOURCE_TOKEN_ID_TWAP: "attestcoin",
+      ORACLE_ATTEST_TOKEN_ID: "attestcoin",
     });
-    expect(cfg.sourceTokenIds).toEqual({
-      twap: "attestcoin",
-      penguinswap: "creditcoin-2",
-    });
+    expect(cfg.ctcTokenId).toBe("creditcoin-2");
+    expect(cfg.attestTokenId).toBe("attestcoin");
   });
 
-  it("requires at least one source token id", () => {
+  it("requires the CTC token id", () => {
     const env = baseEnv();
-    delete env.ORACLE_SOURCE_TOKEN_ID_PENGUINSWAP;
-    expect(() => loadConfig(env)).toThrow(/at least one/);
+    delete env.ORACLE_CTC_TOKEN_ID;
+    expect(() => loadConfig(env)).toThrow(/ORACLE_CTC_TOKEN_ID/);
   });
 
   it("throws when required env vars are missing", () => {
@@ -82,9 +81,9 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ ...baseEnv(), ORACLE_CHAINS: "[]" })).toThrow(
       /non-empty/
     );
-    expect(() =>
-      loadConfig({ ...baseEnv(), ORACLE_CHAINS: "[null]" })
-    ).toThrow(/must be an object/);
+    expect(() => loadConfig({ ...baseEnv(), ORACLE_CHAINS: "[null]" })).toThrow(
+      /must be an object/
+    );
   });
 
   it("rejects out-of-range chainId and duplicates", () => {
@@ -155,10 +154,60 @@ describe("loadConfig", () => {
       loadConfig({
         ...baseEnv(),
         ORACLE_CHAINS: JSON.stringify([
-          { chainId: 2, rpcUrl: "x", coingeckoId: "ethereum", priceBuffer: 500 },
+          {
+            chainId: 2,
+            rpcUrl: "x",
+            coingeckoId: "ethereum",
+            priceBuffer: 500,
+          },
         ]),
       })
     ).toThrow(/encoded as a string/);
+  });
+
+  it("rejects a priceBuffer that exceeds uint16 (PricingData.priceBuffer)", () => {
+    expect(() =>
+      loadConfig({
+        ...baseEnv(),
+        ORACLE_CHAINS: JSON.stringify([
+          {
+            chainId: 2,
+            rpcUrl: "x",
+            coingeckoId: "ethereum",
+            priceBuffer: "65536",
+          },
+        ]),
+      })
+    ).toThrow(/exceeds uint16/);
+    // 65535 is the last representable value.
+    const cfg = loadConfig({
+      ...baseEnv(),
+      ORACLE_CHAINS: JSON.stringify([
+        {
+          chainId: 2,
+          rpcUrl: "x",
+          coingeckoId: "ethereum",
+          priceBuffer: "65535",
+        },
+      ]),
+    });
+    expect(cfg.chains[0]!.priceBuffer).toBe(65_535n);
+  });
+
+  it("accepts a baseFee beyond uint64 (CTC wei amounts are uint256 on-chain)", () => {
+    // 100 CTC = 1e20 wei — a legitimate base fee that would overflow uint64.
+    const cfg = loadConfig({
+      ...baseEnv(),
+      ORACLE_CHAINS: JSON.stringify([
+        {
+          chainId: 2,
+          rpcUrl: "x",
+          coingeckoId: "ethereum",
+          baseFee: "100000000000000000000",
+        },
+      ]),
+    });
+    expect(cfg.chains[0]!.baseFee).toBe(10n ** 20n);
   });
 
   it("treats empty-string numeric env vars as unset, not zero", () => {

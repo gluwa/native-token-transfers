@@ -1,12 +1,16 @@
 import { SigningKey, Wallet, getAddress } from "ethers";
 
-import { assertUint64 } from "./scaling.js";
+import { assertUint16 } from "./scaling.js";
 import type { RetryOptions } from "./retry.js";
 
-/// Which token's USD price is written into the contract's `sourcePrice`.
-///  - "twap":        ATTEST/USD (ATTEST has a direct USD market).
-///  - "penguinswap": CTC/USD; the contract derives ATTEST via the on-chain ATTEST/CTC
-///                   pool (see SMC-1681). Used at launch when ATTEST only trades vs CTC.
+/// How the quoter derives the ATTEST↔native rate (read from `pricingMode()`; enum
+/// TWAP = 0, PENGUIN_SWAP = 1 in IUSCRelayingQuoter). In BOTH modes the oracle pushes
+/// CTC/USD as `sourcePrice` (the mode-independent anchor) and native/USD as `dstPrice`;
+/// the modes differ in where ctcPerAttest comes from:
+///  - "twap":        this service also derives ctcPerAttest = attestUsd / ctcUsd off
+///                   CoinGecko and pushes it into the on-chain TWAPReader each tick.
+///  - "penguinswap": the contract reads ctcPerAttest live from the ATTEST/CTC
+///                   PenguinSwap pool — no reader push needed.
 export type PricingMode = "twap" | "penguinswap";
 
 /// Per-destination-chain configuration. `priceBuffer` and `baseFee` are operator-set
@@ -19,25 +23,30 @@ export interface ChainConfig {
   rpcUrl: string;
   /// CoinGecko id of the chain's native token (e.g. "ethereum", "binancecoin").
   coingeckoId: string;
-  /// Per-chain upward adjustment in basis points (uint64).
+  /// Per-chain upward adjustment in parts per 100,000 (the contract's
+  /// BPS_DENOMINATOR); uint16, so at most 65,535 (= +65.5%).
   priceBuffer: bigint;
-  /// Flat fee in source-chain native wei (uint64).
+  /// Flat fee in CTC wei (uint256 on-chain).
   baseFee: bigint;
 }
 
 export interface OracleServiceConfig {
-  /// Signing key — its address must equal PenguinBridgeExecutionQuoter.oracleService().
+  /// Signing key — its address must equal USCRelayingQuoter.oracleService() (and the
+  /// TWAPReader's, for TWAP mode).
   signingKey: SigningKey;
   /// Address of the signer; precomputed.
   oracleAddress: string;
   /// JSON-RPC URL of the source chain, where the Quoter contract lives.
   rpcUrl: string;
-  /// Address of PenguinBridgeExecutionQuoter on the source chain.
+  /// Address of USCRelayingQuoter on the source chain.
   contractAddress: string;
-  /// CoinGecko id priced into `sourcePrice`, per mode. The active mode is read from the
-  /// contract each tick, so configure the id for any mode the contract may be in. At
-  /// launch ATTEST has no USD market, so typically only the penguinswap id (CTC) exists.
-  sourceTokenIds: Partial<Record<PricingMode, string>>;
+  /// CoinGecko id of CTC — priced into the mode-independent `sourcePrice` anchor and
+  /// each chain's `srcPrice` every tick. Always required.
+  ctcTokenId: string;
+  /// CoinGecko id of ATTEST — needed in TWAP mode to derive ctcPerAttest for the
+  /// TWAPReader push. A tick that finds the contract in twap mode without this id is
+  /// skipped (and startup aborts).
+  attestTokenId: string | undefined;
   /// CoinGecko REST base URL.
   coingeckoBaseUrl: string;
   /// Optional CoinGecko API key (sent as x-cg-demo-api-key / x-cg-pro-api-key).
@@ -92,16 +101,16 @@ function parseIntEnv(
   return value;
 }
 
-/// Parse a uint64 amount field (`priceBuffer` in bps, `baseFee` in wei). Per EVM
-/// convention these must be **decimal strings**: a bare JSON number loses precision in
-/// `JSON.parse` once it exceeds 2^53 (a `baseFee` of 1e16 wei ≈ 0.01 ETH already does),
-/// and `JSON.parse` corrupts it before we ever see it. Omitted ⇒ 0.
-function parseUint64Field(name: string, raw: unknown): bigint {
+/// Parse an amount field (`priceBuffer`, `baseFee` in wei). Per EVM convention these
+/// must be **decimal strings**: a bare JSON number loses precision in `JSON.parse` once
+/// it exceeds 2^53 (a `baseFee` of 1e16 wei ≈ 0.01 CTC already does), and `JSON.parse`
+/// corrupts it before we ever see it. Omitted ⇒ 0.
+function parseAmountField(name: string, raw: unknown): bigint {
   if (raw === undefined || raw === null) {
     return 0n;
   }
   if (typeof raw === "string" && /^\d+$/.test(raw.trim())) {
-    return assertUint64(BigInt(raw.trim()), name);
+    return BigInt(raw.trim());
   }
   throw new Error(
     `${name} must be a non-negative integer encoded as a string (e.g. "1000000000000000"), got ${String(raw)}`
@@ -149,11 +158,13 @@ function parseChains(raw: string): ChainConfig[] {
       chainId,
       rpcUrl: c.rpcUrl,
       coingeckoId: c.coingeckoId,
-      priceBuffer: parseUint64Field(
-        `ORACLE_CHAINS[${i}].priceBuffer`,
-        c.priceBuffer
+      // uint16 on-chain (PricingData.priceBuffer) — reject anything larger here
+      // rather than letting the ABI encoder throw mid-tick.
+      priceBuffer: assertUint16(
+        parseAmountField(`ORACLE_CHAINS[${i}].priceBuffer`, c.priceBuffer),
+        `ORACLE_CHAINS[${i}].priceBuffer`
       ),
-      baseFee: parseUint64Field(`ORACLE_CHAINS[${i}].baseFee`, c.baseFee),
+      baseFee: parseAmountField(`ORACLE_CHAINS[${i}].baseFee`, c.baseFee),
     };
   });
 }
@@ -163,18 +174,12 @@ export function loadConfig(
 ): OracleServiceConfig {
   const wallet = new Wallet(required(env, "ORACLE_PRIVATE_KEY"));
 
-  // The active mode is read from the contract each tick; configure the source token id
-  // for whichever mode(s) the contract may be in. At least one is required.
-  const sourceTokenIds: Partial<Record<PricingMode, string>> = {};
-  const twapId = env["ORACLE_SOURCE_TOKEN_ID_TWAP"];
-  if (twapId) sourceTokenIds.twap = twapId;
-  const penguinswapId = env["ORACLE_SOURCE_TOKEN_ID_PENGUINSWAP"];
-  if (penguinswapId) sourceTokenIds.penguinswap = penguinswapId;
-  if (!sourceTokenIds.twap && !sourceTokenIds.penguinswap) {
-    throw new Error(
-      "at least one of ORACLE_SOURCE_TOKEN_ID_TWAP / ORACLE_SOURCE_TOKEN_ID_PENGUINSWAP is required"
-    );
-  }
+  // CTC is priced every tick regardless of mode (sourcePrice anchor + per-chain
+  // srcPrice). ATTEST is only needed while the contract is in twap mode — the mode is
+  // read from the contract each tick, so leaving it unset simply means twap-mode ticks
+  // are skipped (and startup aborts if twap is the active mode).
+  const ctcTokenId = required(env, "ORACLE_CTC_TOKEN_ID");
+  const attestTokenId = env["ORACLE_ATTEST_TOKEN_ID"] || undefined;
 
   // Floor of 15s: anything faster hammers CoinGecko (429s on the free tier) and sends
   // a tx per tick — a mistyped value like "150" should fail loudly, not DoS ourselves.
@@ -194,7 +199,12 @@ export function loadConfig(
   );
 
   const maxAttempts = parseIntEnv(env, "ORACLE_RPC_MAX_ATTEMPTS", 3, 1);
-  const initialDelayMs = parseIntEnv(env, "ORACLE_RPC_INITIAL_DELAY_MS", 200, 0);
+  const initialDelayMs = parseIntEnv(
+    env,
+    "ORACLE_RPC_INITIAL_DELAY_MS",
+    200,
+    0
+  );
   const maxDelayMs = parseIntEnv(env, "ORACLE_RPC_MAX_DELAY_MS", 2_000, 0);
   if (maxDelayMs < initialDelayMs) {
     throw new Error(
@@ -207,7 +217,8 @@ export function loadConfig(
     oracleAddress: getAddress(wallet.address),
     rpcUrl: required(env, "ORACLE_RPC_URL"),
     contractAddress: getAddress(required(env, "ORACLE_CONTRACT_ADDRESS")),
-    sourceTokenIds,
+    ctcTokenId,
+    attestTokenId,
     coingeckoBaseUrl:
       env["ORACLE_COINGECKO_BASE_URL"] ?? "https://api.coingecko.com/api/v3",
     coingeckoApiKey: env["ORACLE_COINGECKO_API_KEY"] || undefined,

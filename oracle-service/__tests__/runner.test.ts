@@ -7,13 +7,15 @@ import type {
 import type { PriceSource } from "../src/priceSource.js";
 import { TwapAggregator } from "../src/priceSource.js";
 import { readActiveMode, runTick, startRunner } from "../src/runner.js";
-import { usdToScaled } from "../src/scaling.js";
+import { usdRatioWad, usdToScaled } from "../src/scaling.js";
 
-function makeConfig(
-  sourceTokenIds: Partial<Record<PricingMode, string>>
-): OracleServiceConfig {
+function makeConfig(opts?: {
+  ctcTokenId?: string;
+  attestTokenId?: string;
+}): OracleServiceConfig {
   return {
-    sourceTokenIds,
+    ctcTokenId: opts?.ctcTokenId ?? "creditcoin-2",
+    attestTokenId: opts?.attestTokenId,
     pushIntervalMs: 60_000,
     chains: [
       {
@@ -58,15 +60,23 @@ function writerSpy(
   pricingMode: () => Promise<PricingMode> = async () => "penguinswap"
 ): OracleWriter & {
   calls: Array<{ sourcePrice: bigint; updates: ChainPriceUpdate[] }>;
+  twapSamples: bigint[];
 } {
   const calls: Array<{ sourcePrice: bigint; updates: ChainPriceUpdate[] }> = [];
+  const twapSamples: bigint[] = [];
   return {
     calls,
+    twapSamples,
     assertAuthorized: async () => undefined,
+    assertTwapReaderAuthorized: async () => undefined,
     pricingMode,
     pushPrices: async (sourcePrice, updates) => {
       calls.push({ sourcePrice, updates });
       return "0xhash";
+    },
+    pushTwapSample: async (ctcPerAttest) => {
+      twapSamples.push(ctcPerAttest);
+      return "0xtwaphash";
     },
   };
 }
@@ -75,10 +85,10 @@ function writerSpy(
 const spotTwap = (): TwapAggregator => new TwapAggregator(0, () => 0);
 
 describe("runTick", () => {
-  it("penguinswap mode writes CTC/USD as sourcePrice and native/USD as dstPrice", async () => {
+  it("penguinswap mode writes CTC/USD as sourcePrice + srcPrice and native/USD as dstPrice, no TWAPReader push", async () => {
     const writer = writerSpy(async () => "penguinswap");
     const result = await runTick({
-      config: makeConfig({ penguinswap: "creditcoin-2" }),
+      config: makeConfig(),
       priceSource: priceSourceStub({ "creditcoin-2": 0.5, ethereum: 3000 }),
       twap: spotTwap(),
       gasReader: gasReaderStub({ 2: 20_000_000_000n }),
@@ -86,38 +96,50 @@ describe("runTick", () => {
     });
 
     expect(writer.calls).toHaveLength(1);
+    expect(writer.twapSamples).toHaveLength(0);
     expect(result.sourcePrice).toBe(usdToScaled(0.5));
     expect(result.mode).toBe("penguinswap");
+    expect(result.twapTxHash).toBeUndefined();
+    expect(result.ctcPerAttest).toBeUndefined();
     const u = result.updates[0]!;
     expect(u.chainId).toBe(2);
     expect(u.pricing).toEqual({
-      dstPrice: usdToScaled(3000),
-      dstGasPrice: 20_000_000_000n,
-      priceBuffer: 500n,
       baseFee: 1000n,
+      dstGasPrice: 20_000_000_000n,
+      dstPrice: usdToScaled(3000),
+      srcPrice: usdToScaled(0.5),
+      priceBuffer: 500n,
     });
   });
 
-  it("twap mode writes ATTEST/USD as sourcePrice", async () => {
+  it("twap mode still anchors CTC/USD and additionally pushes ctcPerAttest to the TWAPReader", async () => {
     const writer = writerSpy(async () => "twap");
     const result = await runTick({
-      config: makeConfig({ twap: "attestcoin" }),
-      priceSource: priceSourceStub({ attestcoin: 5_000_000, ethereum: 3000 }),
+      config: makeConfig({ attestTokenId: "attestcoin" }),
+      priceSource: priceSourceStub({
+        "creditcoin-2": 0.5,
+        attestcoin: 5_000_000,
+        ethereum: 3000,
+      }),
       twap: spotTwap(),
       gasReader: gasReaderStub({ 2: 1n }),
       writer,
     });
     expect(result.mode).toBe("twap");
-    expect(result.sourcePrice).toBe(usdToScaled(5_000_000));
+    // sourcePrice is the CTC anchor in BOTH modes.
+    expect(result.sourcePrice).toBe(usdToScaled(0.5));
+    expect(result.updates[0]!.pricing.srcPrice).toBe(usdToScaled(0.5));
+    // ctcPerAttest = attestUsd / ctcUsd, 1e18 fp: 5e6 / 0.5 = 1e7 -> 1e25.
+    expect(result.ctcPerAttest).toBe(usdRatioWad(5_000_000, 0.5));
+    expect(result.ctcPerAttest).toBe(10n ** 25n);
+    expect(writer.twapSamples).toEqual([10n ** 25n]);
+    expect(result.twapTxHash).toBe("0xtwaphash");
   });
 
   it("re-reads the contract mode each tick, so an on-chain toggle is picked up", async () => {
     let mode: PricingMode = "penguinswap";
     const writer = writerSpy(async () => mode);
-    const config = makeConfig({
-      twap: "attestcoin",
-      penguinswap: "creditcoin-2",
-    });
+    const config = makeConfig({ attestTokenId: "attestcoin" });
     const priceSource = priceSourceStub({
       "creditcoin-2": 0.5,
       attestcoin: 7,
@@ -133,9 +155,11 @@ describe("runTick", () => {
       writer,
     });
     expect(first.mode).toBe("penguinswap");
-    expect(first.sourcePrice).toBe(usdToScaled(0.5));
+    expect(writer.twapSamples).toHaveLength(0);
+    // penguinswap-mode ticks don't fetch the ATTEST leg.
+    expect(priceSource.requested[0]).not.toContain("attestcoin");
 
-    mode = "twap"; // owner toggles on-chain
+    mode = "twap"; // toggled on-chain (by the oracleService key)
     const second = await runTick({
       config,
       priceSource,
@@ -144,7 +168,9 @@ describe("runTick", () => {
       writer,
     });
     expect(second.mode).toBe("twap");
-    expect(second.sourcePrice).toBe(usdToScaled(7));
+    expect(second.sourcePrice).toBe(usdToScaled(0.5)); // anchor unchanged by mode
+    expect(writer.twapSamples).toEqual([usdRatioWad(7, 0.5)]);
+    expect(priceSource.requested[1]).toContain("attestcoin");
   });
 
   it("skips the tick when the contract mode read fails", async () => {
@@ -153,7 +179,7 @@ describe("runTick", () => {
     });
     await expect(
       runTick({
-        config: makeConfig({ penguinswap: "creditcoin-2" }),
+        config: makeConfig(),
         priceSource: priceSourceStub({ "creditcoin-2": 0.5, ethereum: 3000 }),
         twap: spotTwap(),
         gasReader: gasReaderStub({ 2: 1n }),
@@ -163,25 +189,26 @@ describe("runTick", () => {
     expect(writer.calls).toHaveLength(0);
   });
 
-  it("skips the tick when the active mode has no configured source token id", async () => {
+  it("skips the tick when twap mode is active without an ATTEST token id", async () => {
     const writer = writerSpy(async () => "twap");
     await expect(
       runTick({
-        config: makeConfig({ penguinswap: "creditcoin-2" }),
+        config: makeConfig(), // no attestTokenId
         priceSource: priceSourceStub({ "creditcoin-2": 0.5, ethereum: 3000 }),
         twap: spotTwap(),
         gasReader: gasReaderStub({ 2: 1n }),
         writer,
       })
-    ).rejects.toThrow(/ORACLE_SOURCE_TOKEN_ID_TWAP/);
+    ).rejects.toThrow(/ORACLE_ATTEST_TOKEN_ID/);
     expect(writer.calls).toHaveLength(0);
+    expect(writer.twapSamples).toHaveLength(0);
   });
 
   it("skips the push (throws) when a required price is missing", async () => {
     const writer = writerSpy(async () => "penguinswap");
     await expect(
       runTick({
-        config: makeConfig({ penguinswap: "creditcoin-2" }),
+        config: makeConfig(),
         priceSource: priceSourceStub({ "creditcoin-2": 0.5 }), // ethereum missing
         twap: spotTwap(),
         gasReader: gasReaderStub({ 2: 1n }),
@@ -196,7 +223,7 @@ describe("runTick", () => {
     const infos: string[] = [];
     const errors: string[] = [];
     const handle = startRunner({
-      config: makeConfig({ penguinswap: "creditcoin-2" }),
+      config: makeConfig(),
       priceSource: priceSourceStub({ "creditcoin-2": 0.5, ethereum: 3000 }),
       twap: spotTwap(),
       gasReader: gasReaderStub({ 2: 1n }),
@@ -226,7 +253,7 @@ describe("runTick", () => {
     const writer = writerSpy(async () => "penguinswap");
     await expect(
       runTick({
-        config: makeConfig({ penguinswap: "creditcoin-2" }),
+        config: makeConfig(),
         priceSource: priceSourceStub({ "creditcoin-2": 0.5, ethereum: 3000 }),
         twap: spotTwap(),
         gasReader: {
@@ -239,6 +266,29 @@ describe("runTick", () => {
     ).rejects.toThrow(/rpc down/);
     expect(writer.calls).toHaveLength(0);
   });
+
+  it("all reads complete before any push: a gas failure means no TWAPReader push either", async () => {
+    const writer = writerSpy(async () => "twap");
+    await expect(
+      runTick({
+        config: makeConfig({ attestTokenId: "attestcoin" }),
+        priceSource: priceSourceStub({
+          "creditcoin-2": 0.5,
+          attestcoin: 5_000_000,
+          ethereum: 3000,
+        }),
+        twap: spotTwap(),
+        gasReader: {
+          gasPrice: async () => {
+            throw new Error("rpc down");
+          },
+        },
+        writer,
+      })
+    ).rejects.toThrow(/rpc down/);
+    expect(writer.twapSamples).toHaveLength(0);
+    expect(writer.calls).toHaveLength(0);
+  });
 });
 
 describe("readActiveMode", () => {
@@ -246,24 +296,31 @@ describe("readActiveMode", () => {
     const writer = writerSpy(async () => "twap");
     const mode = await readActiveMode(
       writer,
-      makeConfig({ twap: "attestcoin", penguinswap: "creditcoin-2" })
+      makeConfig({ attestTokenId: "attestcoin" })
     );
     expect(mode).toBe("twap");
   });
 
-  it("throws when the active mode has no configured source token id", async () => {
+  it("throws when twap mode is active without an ATTEST token id", async () => {
     const writer = writerSpy(async () => "twap");
-    await expect(
-      readActiveMode(writer, makeConfig({ penguinswap: "creditcoin-2" }))
-    ).rejects.toThrow(/ORACLE_SOURCE_TOKEN_ID_TWAP/);
+    await expect(readActiveMode(writer, makeConfig())).rejects.toThrow(
+      /ORACLE_ATTEST_TOKEN_ID/
+    );
+  });
+
+  it("penguinswap mode needs no ATTEST id", async () => {
+    const writer = writerSpy(async () => "penguinswap");
+    await expect(readActiveMode(writer, makeConfig())).resolves.toBe(
+      "penguinswap"
+    );
   });
 
   it("propagates a contract read failure (caller surfaces it)", async () => {
     const writer = writerSpy(async () => {
       throw new Error("pricingMode() is not callable");
     });
-    await expect(
-      readActiveMode(writer, makeConfig({ penguinswap: "creditcoin-2" }))
-    ).rejects.toThrow(/not callable/);
+    await expect(readActiveMode(writer, makeConfig())).rejects.toThrow(
+      /not callable/
+    );
   });
 });

@@ -19,24 +19,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-        with:
-          submodules: recursive
 
       - uses: actions/setup-node@v6
         with:
           node-version: 24.11.0
           cache: "npm"
 
-      # Foundry provides anvil + the quoter artifact (evm/out) so the anvil
-      # integration suite runs instead of auto-skipping.
+      # Foundry provides anvil, so the integration suite runs instead of
+      # auto-skipping (the contract artifacts are vendored in __tests__/fixtures).
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
           version: v1.3.6
-
-      - name: Build EVM artifacts
-        working-directory: ./evm
-        run: forge build
 
       - run: npm ci
       - run: npm run typecheck --workspace=oracle-service

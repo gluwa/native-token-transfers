@@ -68,3 +68,37 @@ export function assertUint64(value: bigint, label: string): bigint {
   }
   return value;
 }
+
+const UINT16_MAX = 2n ** 16n - 1n;
+
+/// Assert a value fits the contract's `uint16` (PricingData.priceBuffer).
+export function assertUint16(value: bigint, label: string): bigint {
+  if (value < 0n) {
+    throw new RangeError(`${label} must be non-negative, got ${value}`);
+  }
+  if (value > UINT16_MAX) {
+    throw new RangeError(`${label} ${value} exceeds uint16`);
+  }
+  return value;
+}
+
+/// 18-decimal fixed point ("wad"), the scale TWAPReader.update() expects.
+export const WAD = 10n ** 18n;
+
+/// Ratio of two positive USD prices as an 18-decimal fixed-point value — used for
+/// ctcPerAttest = attestUsd / ctcUsd. Both legs go through the same 1e10 scaling as
+/// the contract prices, so the ratio carries their full precision.
+export function usdRatioWad(
+  numeratorUsd: number | string,
+  denominatorUsd: number | string
+): bigint {
+  const num = usdToScaled(numeratorUsd);
+  const den = usdToScaled(denominatorUsd);
+  const ratio = (num * WAD) / den;
+  if (ratio <= 0n) {
+    throw new RangeError(
+      `ratio ${numeratorUsd}/${denominatorUsd} scaled to wad is zero`
+    );
+  }
+  return ratio;
+}

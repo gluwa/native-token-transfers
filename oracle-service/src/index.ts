@@ -5,7 +5,15 @@ export type {
   PricingMode,
 } from "./config.js";
 
-export { PRICE_DECIMALS, PRICE_SCALE, assertUint64, usdToScaled } from "./scaling.js";
+export {
+  PRICE_DECIMALS,
+  PRICE_SCALE,
+  WAD,
+  assertUint16,
+  assertUint64,
+  usdRatioWad,
+  usdToScaled,
+} from "./scaling.js";
 
 export {
   CoinGeckoError,
@@ -20,6 +28,7 @@ export type {
 export {
   OracleNotAuthorizedError,
   QUOTER_WRITE_ABI,
+  TWAP_READER_ABI,
   RpcGasPriceReader,
   RpcOracleWriter,
 } from "./oracle.js";

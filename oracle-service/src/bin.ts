@@ -23,7 +23,9 @@ async function main(): Promise<void> {
     retry: config.retry,
   });
   const twap = new TwapAggregator(config.twapWindowMs);
-  const gasReader = new RpcGasPriceReader(config.chains, { retry: config.retry });
+  const gasReader = new RpcGasPriceReader(config.chains, {
+    retry: config.retry,
+  });
   const writer = new RpcOracleWriter({
     rpcUrl: config.rpcUrl,
     contractAddress: config.contractAddress,
@@ -49,7 +51,7 @@ async function main(): Promise<void> {
 
   // Read the contract's current mode once at startup the same way every tick will, so
   // we fail fast if the contract isn't the required quoter (no pricingMode() getter) or
-  // the active mode's source token id is missing, rather than skipping every tick.
+  // twap mode is active without an ATTEST token id, rather than skipping every tick.
   let initialMode: PricingMode;
   try {
     initialMode = await readActiveMode(writer, config);
@@ -60,6 +62,23 @@ async function main(): Promise<void> {
     writer.dispose();
     gasReader.dispose();
     process.exit(1);
+  }
+
+  // Twap mode pushes into the quoter's TWAPReader every tick — verify at startup that
+  // the reader is configured and gates update() behind OUR key (its oracleService is
+  // set independently of the quoter's). Only checked when twap is the active mode; a
+  // later on-chain toggle to twap surfaces the same error per tick.
+  if (initialMode === "twap") {
+    try {
+      await writer.assertTwapReaderAuthorized(config.oracleAddress);
+    } catch (err) {
+      console.error(
+        `startup TWAPReader check failed: ${err instanceof Error ? err.message : String(err)}`
+      );
+      writer.dispose();
+      gasReader.dispose();
+      process.exit(1);
+    }
   }
 
   const onSuccess = config.heartbeatFile
@@ -76,8 +95,8 @@ async function main(): Promise<void> {
   });
 
   console.log(
-    `oracle-service started (mode=${initialMode}, ` +
-      `sourceToken=${config.sourceTokenIds[initialMode]}, ` +
+    `oracle-service started (mode=${initialMode}, ctc=${config.ctcTokenId}, ` +
+      `attest=${config.attestTokenId ?? "unset"}, ` +
       `chains=${config.chains.map((c) => c.chainId).join(",")}, ` +
       `interval=${config.pushIntervalMs}ms, contract=${config.contractAddress})`
   );

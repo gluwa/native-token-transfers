@@ -66,7 +66,9 @@ async function withMockRpc(
           }
         });
         res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify(Array.isArray(parsed) ? responses : responses[0]));
+        res.end(
+          JSON.stringify(Array.isArray(parsed) ? responses : responses[0])
+        );
       } catch (err) {
         if (err instanceof HttpStatusError) {
           res.writeHead(err.status, { "content-type": "text/plain" });
@@ -265,12 +267,14 @@ describe("RpcOracleWriter.pricingMode", () => {
 });
 
 describe("batchPriceUpdate ABI", () => {
-  it("encodes/decodes with PricingData fields in (dstPrice, dstGasPrice, priceBuffer, baseFee) order", () => {
+  it("encodes/decodes with PricingData fields in (baseFee, dstGasPrice, dstPrice, srcPrice, priceBuffer) order", () => {
+    // Field order mirrors IUSCRelayingQuoter.PricingData exactly.
     const pricing = {
-      dstPrice: 1000n,
-      dstGasPrice: 2000n,
-      priceBuffer: 500n,
       baseFee: 7n,
+      dstGasPrice: 2000n,
+      dstPrice: 1000n,
+      srcPrice: 42n,
+      priceBuffer: 500n,
     };
     const data = iface.encodeFunctionData("batchPriceUpdate", [
       42n,
@@ -282,9 +286,37 @@ describe("batchPriceUpdate ABI", () => {
     expect(decoded[1].map((c: bigint) => Number(c))).toEqual([2, 5]);
     // Tuple positional order must match the Solidity struct.
     const tuple = decoded[2][0];
-    expect(tuple[0]).toBe(1000n); // dstPrice
+    expect(tuple[0]).toBe(7n); // baseFee
     expect(tuple[1]).toBe(2000n); // dstGasPrice
-    expect(tuple[2]).toBe(500n); // priceBuffer
-    expect(tuple[3]).toBe(7n); // baseFee
+    expect(tuple[2]).toBe(1000n); // dstPrice
+    expect(tuple[3]).toBe(42n); // srcPrice
+    expect(tuple[4]).toBe(500n); // priceBuffer
+  });
+});
+
+describe("RpcOracleWriter.pushTwapSample", () => {
+  const TWAP_READER_SELECTOR = iface.getFunction("twapReader")!.selector;
+
+  it("fails with a clear error when the quoter's TWAPReader is unset", async () => {
+    const handler: RpcHandler = (req) => {
+      if (req.method === "eth_chainId") return "0x7a69";
+      if (req.method === "eth_call") {
+        const data = (req.params as Array<{ data: string }>)[0]!.data;
+        if (data.slice(0, 10) === TWAP_READER_SELECTOR) {
+          return iface.encodeFunctionResult("twapReader", [
+            "0x" + "0".repeat(40),
+          ]);
+        }
+        throw new Error(`unexpected eth_call ${data.slice(0, 10)}`);
+      }
+      throw new Error(`unexpected RPC method ${req.method}`);
+    };
+    await withMockRpc(handler, async (url) => {
+      await withWriter({ rpcUrl: url }, async (w) => {
+        await expect(w.pushTwapSample(10n ** 25n)).rejects.toThrow(
+          /twapReader\(\) is unset/
+        );
+      });
+    });
   });
 });
