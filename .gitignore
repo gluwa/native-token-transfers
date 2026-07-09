@@ -33,3 +33,5 @@ node_modules
 
 # Bun lock files (created during manual CLI installation)
 bun.lock
+
+evm/broadcast
