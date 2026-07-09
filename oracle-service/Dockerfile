@@ -12,6 +12,9 @@ WORKDIR /app
 # The workspace's tsconfigs extend the repo-root tsconfigs at `../tsconfig.*.json`.
 COPY tsconfig.json tsconfig.cjs.json tsconfig.esm.json /
 COPY oracle-service/package.json oracle-service/package-lock.json oracle-service/tsconfig.cjs.json oracle-service/tsconfig.esm.json ./
+# npm ci resolves from oracle-service/package-lock.json — a Docker-build-only lockfile
+# (the repo's workspaces install from the ROOT lockfile). Keep them in sync when bumping
+# deps: cd oracle-service && npm install --package-lock-only
 RUN npm ci --no-audit --no-fund
 
 COPY oracle-service/src ./src

@@ -177,6 +177,25 @@ describe("loadConfig", () => {
     ).toThrow(/ORACLE_TWAP_WINDOW_MS/);
   });
 
+  it("rejects a push interval below 15s (likely a ms/s typo)", () => {
+    expect(() =>
+      loadConfig({ ...baseEnv(), ORACLE_PUSH_INTERVAL_MS: "150" })
+    ).toThrow(/ORACLE_PUSH_INTERVAL_MS must be an integer >= 15000/);
+    expect(
+      loadConfig({ ...baseEnv(), ORACLE_PUSH_INTERVAL_MS: "15000" })
+        .pushIntervalMs
+    ).toBe(15_000);
+  });
+
+  it("accepts ORACLE_TWAP_WINDOW_MS=0 (disables time-weighting)", () => {
+    expect(
+      loadConfig({ ...baseEnv(), ORACLE_TWAP_WINDOW_MS: "0" }).twapWindowMs
+    ).toBe(0);
+    expect(() =>
+      loadConfig({ ...baseEnv(), ORACLE_TWAP_WINDOW_MS: "-1" })
+    ).toThrow(/ORACLE_TWAP_WINDOW_MS/);
+  });
+
   it("rejects bad retry bounds", () => {
     expect(() =>
       loadConfig({ ...baseEnv(), ORACLE_RPC_MAX_ATTEMPTS: "0" })

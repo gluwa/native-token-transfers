@@ -184,7 +184,7 @@ maybe("oracle end-to-end against anvil", () => {
     }
   }, 30_000);
 
-  it("times out waiting for a stuck transaction instead of hanging the loop", async () => {
+  it("times out on a stuck transaction, then replaces it with bumped fees", async () => {
     const writer = new RpcOracleWriter({
       rpcUrl: anvil.rpcUrl,
       contractAddress: quoterAddress,
@@ -217,18 +217,32 @@ maybe("oracle end-to-end against anvil", () => {
       const pending = await provider.getTransactionCount(oracleAddr, "pending");
       expect(pending).toBe(latest + 1);
 
-      // The next push must reuse the stuck tx's nonce (a replacement attempt — it
-      // may be rejected as underpriced or time out itself), NOT queue a second tx
-      // behind it. Either way the pending count must not grow.
-      await writer.pushPrices(usdToScaled(0.6), updates).catch(() => undefined);
+      // The next push must reuse the stuck tx's nonce with fees bumped ≥12.5%, so
+      // the node ACCEPTS the replacement even though market gas hasn't moved (a
+      // same-fee resend would be rejected as underpriced). It can't mine either, so
+      // it also times out — but it must not queue a second tx behind the first.
+      await expect(
+        writer.pushPrices(usdToScaled(0.6), updates)
+      ).rejects.toMatchObject({ code: "TIMEOUT" });
       const pendingAfter = await provider.getTransactionCount(
         oracleAddr,
         "pending"
       );
       expect(pendingAfter).toBe(latest + 1);
+
+      // Mining now lands exactly one tx — the bumped replacement, carrying the
+      // second push's prices.
+      await provider.send("anvil_setAutomine", [true]);
+      await provider.send("evm_mine", []);
+      expect(await provider.getTransactionCount(oracleAddr, "latest")).toBe(
+        latest + 1
+      );
+      expect((await quoterContract.sourcePrice()) as bigint).toBe(
+        usdToScaled(0.6)
+      );
     } finally {
       await provider.send("anvil_setAutomine", [true]);
-      // Flush the stranded tx so it can't bleed into other tests.
+      // Flush any stranded tx so it can't bleed into other tests.
       await provider.send("evm_mine", []);
       writer.dispose();
     }

@@ -176,8 +176,16 @@ export function loadConfig(
     );
   }
 
-  const pushIntervalMs = parseIntEnv(env, "ORACLE_PUSH_INTERVAL_MS", 60_000, 15);
-  const twapWindowMs = parseIntEnv(env, "ORACLE_TWAP_WINDOW_MS", 300_000, 15);
+  // Floor of 15s: anything faster hammers CoinGecko (429s on the free tier) and sends
+  // a tx per tick — a mistyped value like "150" should fail loudly, not DoS ourselves.
+  const pushIntervalMs = parseIntEnv(
+    env,
+    "ORACLE_PUSH_INTERVAL_MS",
+    60_000,
+    15_000
+  );
+  // 0 is valid: it disables time-weighting (every push is spot).
+  const twapWindowMs = parseIntEnv(env, "ORACLE_TWAP_WINDOW_MS", 300_000, 0);
   const txWaitTimeoutMs = parseIntEnv(
     env,
     "ORACLE_TX_WAIT_TIMEOUT_MS",

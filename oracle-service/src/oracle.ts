@@ -83,6 +83,22 @@ export interface RpcOracleWriterOptions {
   staticNetwork?: boolean;
 }
 
+/// Fee fields of a sent pushPrices tx, kept until it's confirmed mined so a later tick
+/// that reuses its nonce can bump the replacement above it.
+interface SentTxFees {
+  nonce: number;
+  maxFeePerGas: bigint | null;
+  maxPriorityFeePerGas: bigint | null;
+  gasPrice: bigint | null;
+  gasLimit: bigint;
+}
+
+/// Nodes only accept a same-nonce replacement priced ≥~10% above the original (geth's
+/// default). 12.5% adds margin without materially overpaying.
+const bumpFee = (v: bigint): bigint => (v * 1125n) / 1000n + 1n;
+
+const maxBigint = (a: bigint, b: bigint): bigint => (a > b ? a : b);
+
 export class RpcOracleWriter implements OracleWriter {
   private readonly provider: JsonRpcProvider;
   private readonly wallet: Wallet;
@@ -90,6 +106,8 @@ export class RpcOracleWriter implements OracleWriter {
   private readonly retry: RetryOptions;
   private readonly txWaitTimeoutMs: number;
   private readonly sleep: ((ms: number) => Promise<void>) | undefined;
+  /// The last pushPrices send not yet confirmed mined; cleared once its receipt lands.
+  private lastSent: SentTxFees | undefined;
 
   constructor(opts: RpcOracleWriterOptions) {
     this.provider = opts.staticNetwork
@@ -161,23 +179,81 @@ export class RpcOracleWriter implements OracleWriter {
     const chainIds = updates.map((u) => u.chainId);
     const prices = updates.map((u) => u.pricing);
     // Nonce from "latest", not the default "pending": if a previous tick's tx is
-    // stuck in the mempool, this tick reuses its nonce and replaces it (at current
-    // gas) instead of queueing behind it forever. A replacement rejected as
-    // underpriced just fails this tick; later ticks keep trying as gas moves.
+    // stuck in the mempool, this tick reuses its nonce and replaces it instead of
+    // queueing behind it forever.
     const nonce = await this.wallet.getNonce("latest");
+    const overrides: {
+      nonce: number;
+      maxFeePerGas?: bigint;
+      maxPriorityFeePerGas?: bigint;
+      gasPrice?: bigint;
+      gasLimit?: bigint;
+    } = { nonce };
+    const last = this.lastSent;
+    if (last && last.nonce === nonce) {
+      // Replacing our own stuck tx. If market gas hasn't moved, resending at current
+      // fees would be rejected as underpriced every tick — bump ≥12.5% over the stuck
+      // tx's fees, taking current market fees instead when those are already higher.
+      const fee = await this.provider.getFeeData();
+      if (last.maxFeePerGas != null) {
+        overrides.maxPriorityFeePerGas = maxBigint(
+          fee.maxPriorityFeePerGas ?? 0n,
+          bumpFee(last.maxPriorityFeePerGas ?? 0n)
+        );
+        overrides.maxFeePerGas = maxBigint(
+          maxBigint(fee.maxFeePerGas ?? 0n, bumpFee(last.maxFeePerGas)),
+          overrides.maxPriorityFeePerGas
+        );
+      } else if (last.gasPrice != null) {
+        overrides.gasPrice = maxBigint(
+          fee.gasPrice ?? 0n,
+          bumpFee(last.gasPrice)
+        );
+      }
+      // Gas limit must be estimated against "latest" explicitly: the node's default
+      // estimate runs on PENDING state, where the stuck tx has already executed, so
+      // the storage it writes is counted warm/nonzero. The replacement executes
+      // INSTEAD of the stuck tx (cold zero slots) — an estimate off pending state
+      // undershoots and the replacement mines as an OutOfGas revert.
+      const est = (await this.provider.send("eth_estimateGas", [
+        {
+          from: this.wallet.address,
+          to: this.contract.target,
+          data: this.contract.interface.encodeFunctionData("batchPriceUpdate", [
+            sourcePrice,
+            chainIds,
+            prices,
+          ]),
+        },
+        "latest",
+      ])) as string;
+      overrides.gasLimit = maxBigint(BigInt(est), last.gasLimit);
+    }
     const tx = (await this.contract["batchPriceUpdate"]!(
       sourcePrice,
       chainIds,
       prices,
-      { nonce }
+      overrides
     )) as {
       hash: string;
+      maxFeePerGas: bigint | null;
+      maxPriorityFeePerGas: bigint | null;
+      gasPrice: bigint | null;
+      gasLimit: bigint;
       wait: (confirms?: number, timeout?: number) => Promise<unknown>;
+    };
+    this.lastSent = {
+      nonce,
+      maxFeePerGas: tx.maxFeePerGas,
+      maxPriorityFeePerGas: tx.maxPriorityFeePerGas,
+      gasPrice: tx.gasPrice,
+      gasLimit: tx.gasLimit,
     };
     // Bounded wait: a stuck transaction (underpriced, source chain stalled) rejects
     // with code TIMEOUT instead of hanging the push loop forever; the tick is logged
-    // as skipped and the next interval replaces it.
+    // as skipped and the next interval replaces it (bumped, above).
     await tx.wait(1, this.txWaitTimeoutMs);
+    this.lastSent = undefined; // mined — nothing pending to replace
     return tx.hash;
   }
 }

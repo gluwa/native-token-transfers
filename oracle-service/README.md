@@ -52,7 +52,7 @@ All config is via environment variables:
 | `ORACLE_CHAINS`                     | yes               |                                      | JSON array of destination chains (see below).                              |
 | `ORACLE_COINGECKO_BASE_URL`         | no                | `https://api.coingecko.com/api/v3`   | CoinGecko REST base. Use the pro host for a pro key.                        |
 | `ORACLE_COINGECKO_API_KEY`          | no                |                                      | Sent as `x-cg-demo-api-key` (or `x-cg-pro-api-key` for the pro host).       |
-| `ORACLE_PUSH_INTERVAL_MS`           | no                | `60000`                              | Interval between pushes.                                                    |
+| `ORACLE_PUSH_INTERVAL_MS`           | no                | `60000`                              | Interval between pushes. Minimum `15000` (15s).                             |
 | `ORACLE_TWAP_WINDOW_MS`             | no                | `300000`                             | Rolling time-weighting window. `0` disables weighting (push spot).          |
 | `ORACLE_TX_WAIT_TIMEOUT_MS`         | no                | `120000`                             | Max wait for the `batchPriceUpdate` receipt before the tick fails.          |
 | `ORACLE_HEARTBEAT_FILE`             | no                |                                      | File touched after each successful push, for the container healthcheck.     |
@@ -75,7 +75,7 @@ All config is via environment variables:
 - `priceBuffer` — per-chain upward adjustment in basis points (uint64). **Decimal string**; omit for 0.
 - `baseFee` — flat fee in source-chain native wei (uint64). **Decimal string** (wei values exceed JS's safe integer range — a bare number would lose precision); omit for 0.
 
-Retry only kicks in for transient failures (RPC `NETWORK_ERROR`/`SERVER_ERROR`/`TIMEOUT`, CoinGecko 5xx/429, transport errors). Contract reverts and CoinGecko 4xx are not retried. The `batchPriceUpdate` send itself is **not** retried within a tick — a transient failure simply skips to the next interval, which overwrites prices anyway, so there is no double-submission risk. Waiting for the receipt is bounded by `ORACLE_TX_WAIT_TIMEOUT_MS` so a transaction stuck in the mempool fails the tick instead of freezing the loop; the next tick reuses the stuck transaction's nonce (replacing it at current gas) rather than queueing behind it. The per-tick `pricingMode()` read is covered by the same retry policy; if it still fails, the tick is skipped rather than priced under a guessed mode.
+Retry only kicks in for transient failures (RPC `NETWORK_ERROR`/`SERVER_ERROR`/`TIMEOUT`, CoinGecko 5xx/429, transport errors). Contract reverts and CoinGecko 4xx are not retried. The `batchPriceUpdate` send itself is **not** retried within a tick — a transient failure simply skips to the next interval, which overwrites prices anyway, so there is no double-submission risk. Waiting for the receipt is bounded by `ORACLE_TX_WAIT_TIMEOUT_MS` so a transaction stuck in the mempool fails the tick instead of freezing the loop; the next tick reuses the stuck transaction's nonce, bumping fees ≥12.5% over the stuck tx (or to current market, whichever is higher) so the node accepts the replacement even when gas hasn't moved. The per-tick `pricingMode()` read is covered by the same retry policy; if it still fails, the tick is skipped rather than priced under a guessed mode.
 
 ## Development
 
@@ -101,6 +101,8 @@ Multi-stage Dockerfile; runtime is `node:20-alpine` as a non-root user. Build fr
 ```bash
 docker build -t ntt-oracle-service:latest -f oracle-service/Dockerfile .
 ```
+
+> **Note on `oracle-service/package-lock.json`:** npm workspaces resolve dependencies from the **repo-root** lockfile; the nested lockfile here exists only so the Docker build can `npm ci` with the workspace directory as its install root. The two can drift silently — when bumping this workspace's dependencies, regenerate the nested lockfile (`cd oracle-service && npm install --package-lock-only`) so the image ships the same versions the repo tests against.
 
 ### Runtime model
 
