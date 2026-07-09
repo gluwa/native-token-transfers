@@ -43,7 +43,8 @@
     "sdk/examples",
     "cli",
     "quoter-service",
-    "oracle-service"
+    "oracle-service",
+    "relayer-bot"
   ],
   "overrides": {
     "ts-jest": {

@@ -16,11 +16,14 @@ function parseArgs() {
   const dest = args.dest as ChainName;
   const amount = args.amount as string; // base units
   const recipient = args.recipient as string; // evm address
+  // --special routes via the SpecialRelayer path (emits ExecutionRequested) so the
+  // off-chain relayer-bot delivers the transfer, instead of the default plain path.
+  const special = "special" in args;
   if (!source || !dest || !amount || !recipient) {
-    console.error("Usage: npx tsx devnet/scripts/ntt-transfer.ts --source=chainA --dest=chainB --amount=1000000000000000000 --recipient=0xabc...");
+    console.error("Usage: npx tsx devnet/scripts/ntt-transfer.ts --source=chainA --dest=chainB --amount=1000000000000000000 --recipient=0xabc... [--special]");
     process.exit(1);
   }
-  return { source, dest, amount, recipient };
+  return { source, dest, amount, recipient, special };
 }
 
 function parseSimpleEnv(text: string): Record<string, string> {
@@ -44,6 +47,44 @@ function toWormholeFormat(addr: string): string {
   return ethers.hexlify(ethers.zeroPadValue(addr, 32));
 }
 
+// Well-known anvil account #1 — must match the quote signer registered by
+// deploy-special-relayer.ts (override both with QUOTE_SIGNER_KEY).
+const DEFAULT_QUOTE_SIGNER_KEY =
+  "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+
+/** Build a PQ01 signed quote whose body layout matches SpecialRelayer._parseSignedQuote. */
+function buildSignedQuote(opts: {
+  signerKey: string;
+  srcWhChainId: number;
+  dstWhChainId: number;
+  gasLimit: bigint;
+  requiredPayment: bigint;
+}): string {
+  const signer = new ethers.Wallet(opts.signerKey);
+  const expiry = BigInt(Math.floor(Date.now() / 1000) + 3600);
+  const body = ethers.concat([
+    "0x50513031", // "PQ01"
+    signer.address, // quoted quoter (20)
+    ethers.zeroPadValue("0x00", 32), // payee unset → SpecialRelayer falls back to owner
+    ethers.toBeHex(opts.srcWhChainId, 2),
+    ethers.toBeHex(opts.dstWhChainId, 2),
+    ethers.toBeHex(expiry, 8),
+    ethers.toBeHex(opts.gasLimit, 32),
+    ethers.toBeHex(opts.requiredPayment, 32),
+  ]);
+  const sig = new ethers.SigningKey(opts.signerKey).sign(ethers.keccak256(body));
+  return ethers.concat([body, sig.r, sig.s, ethers.toBeHex(sig.v, 1)]);
+}
+
+/** Wrap a signed quote as the manager's `transceiverInstructions` bytes (single transceiver). */
+function encodeSpecialInstructions(signedQuote: string): string {
+  // WormholeTransceiverInstruction = shouldSkipRelayerSend(false, 1 byte) ++ signedQuoteBytes
+  const weIns = ethers.concat(["0x00", signedQuote]);
+  // TransceiverInstruction = index(1) ++ len(1) ++ payload ; then count(1)-prefixed list
+  const inner = ethers.concat(["0x00", ethers.toBeHex(ethers.dataLength(weIns), 1), weIns]);
+  return ethers.concat(["0x01", inner]);
+}
+
 async function main() {
   const DEPLOYER_KEY = process.env["DEPLOYER_KEY"];
   if (!DEPLOYER_KEY) {
@@ -51,7 +92,7 @@ async function main() {
     process.exit(1);
   }
 
-  const { source, dest, amount, recipient } = parseArgs();
+  const { source, dest, amount, recipient, special } = parseArgs();
 
   const deploymentPath = "devnet/config/deployment.local.json";
   if (!fs.existsSync(deploymentPath)) {
@@ -70,6 +111,7 @@ async function main() {
   const dstCfg = parseSimpleEnv(fs.readFileSync(dstEnvPath, "utf8"));
   const srcRPC = srcCfg["RPC_URL"];
   const dstRPC = dstCfg["RPC_URL"];
+  const srcWhChainId = Number(srcCfg["WORMHOLE_CHAIN_ID"]);
   const dstWhChainId = Number(dstCfg["WORMHOLE_CHAIN_ID"]);
 
   const src = deployment.chains?.[source];
@@ -86,6 +128,7 @@ async function main() {
 
   const nttManagerAbi = [
     "function transfer(uint256 amount, uint16 recipientChain, bytes32 recipient) payable returns (uint64)",
+    "function transfer(uint256 amount, uint16 recipientChain, bytes32 recipient, bytes32 refundAddress, bool shouldQueue, bytes transceiverInstructions) payable returns (uint64)",
     "function quoteDeliveryPrice(uint16 recipientChain, bytes transceiverInstructions) view returns (uint256[] priceQuotes, uint256 totalPrice)",
     "function token() view returns (address)",
   ];
@@ -108,10 +151,37 @@ async function main() {
     await tx.wait();
   }
 
+  // Build transceiver instructions.
+  // - default: 0x00 ("no instructions"); the plain Core path / devnet relayer delivers.
+  // - --special: a SpecialRelayer instruction carrying a signed quote, so the source
+  //   transceiver emits ExecutionRequested and the off-chain relayer-bot delivers.
+  let instructions = "0x00";
+  if (special) {
+    if (!src.special_relayer || !src.quote_signer) {
+      console.error("--special requires special_relayer/quote_signer in the manifest. Run deploy-special-relayer.ts first.");
+      process.exit(1);
+    }
+    const transceiverAbi = ["function gasLimit() view returns (uint256)"];
+    const transceiver = new ethers.Contract(src.ntt_transceiver, transceiverAbi, srcProvider);
+    const gasLimit: bigint = await transceiver.gasLimit();
+    const signerKey = process.env["QUOTE_SIGNER_KEY"] || DEFAULT_QUOTE_SIGNER_KEY;
+    if (new ethers.Wallet(signerKey).address.toLowerCase() !== String(src.quote_signer).toLowerCase()) {
+      console.error(`QUOTE_SIGNER_KEY address != manifest quote_signer (${src.quote_signer}).`);
+      process.exit(1);
+    }
+    const signedQuote = buildSignedQuote({
+      signerKey,
+      srcWhChainId,
+      dstWhChainId,
+      gasLimit,
+      requiredPayment: 0n, // quoter is priced to 0 on devnet
+    });
+    instructions = encodeSpecialInstructions(signedQuote);
+    console.log(`Special relaying: signed quote (gasLimit=${gasLimit}), instructions=${instructions}`);
+  }
+
   // Quote delivery price (manual mode fallback returns Core message fee)
-  // IMPORTANT: transceiverInstructions must be length-prefixed; pass 0x00 for "no instructions"
-  const emptyInstructions = "0x00";
-  const [, totalPrice]: [bigint[], bigint] = await manager.quoteDeliveryPrice(dstWhChainId, emptyInstructions);
+  const [, totalPrice]: [bigint[], bigint] = await manager.quoteDeliveryPrice(dstWhChainId, instructions);
   console.log(`Delivery price (native): ${ethers.formatEther(totalPrice)} ETH`);
 
   // Destination balance before
@@ -120,8 +190,13 @@ async function main() {
   console.log(`Dest balance before: ${beforeBal.toString()}`);
 
   // Send
-  console.log("Sending NTT transfer...");
-  const tx = await manager.transfer(amt, dstWhChainId, toWormholeFormat(recipient), { value: totalPrice });
+  console.log(`Sending NTT transfer${special ? " (special relaying)" : ""}...`);
+  const tx = special
+    ? await manager["transfer(uint256,uint16,bytes32,bytes32,bool,bytes)"](
+        amt, dstWhChainId, toWormholeFormat(recipient), toWormholeFormat(recipient), false, instructions,
+        { value: totalPrice }
+      )
+    : await manager.transfer(amt, dstWhChainId, toWormholeFormat(recipient), { value: totalPrice });
   const rc = await tx.wait();
   console.log(`transfer.tx: ${tx.hash} status: ${rc?.status}`);
 

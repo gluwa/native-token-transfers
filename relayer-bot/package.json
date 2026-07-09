@@ -1,0 +1,66 @@
+{
+  "name": "@wormhole-foundation/ntt-relayer-bot",
+  "version": "1.0.0",
+  "description": "Off-chain relayer bot that delivers Wormhole NTT messages to destination chains.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/cjs/index.d.ts",
+  "exports": {
+    ".": {
+      "require": {
+        "types": "./dist/cjs/index.d.ts",
+        "default": "./dist/cjs/index.js"
+      },
+      "import": {
+        "types": "./dist/esm/index.d.ts",
+        "default": "./dist/esm/index.js"
+      }
+    }
+  },
+  "bin": {
+    "ntt-relayer-bot": "./dist/esm/bin.js"
+  },
+  "files": [
+    "dist/esm",
+    "dist/cjs",
+    "migrations"
+  ],
+  "scripts": {
+    "build:cjs": "tsc -p ./tsconfig.cjs.json && echo '{\"type\":\"commonjs\"}' > dist/cjs/package.json",
+    "build:esm": "tsc -p ./tsconfig.esm.json",
+    "build": "npm run build:esm && npm run build:cjs",
+    "rebuild": "npm run clean && npm run build",
+    "clean": "rm -rf ./dist",
+    "start": "node ./dist/esm/bin.js",
+    "start:listener": "node ./dist/esm/bin.js --role=listener",
+    "start:worker": "node ./dist/esm/bin.js --role=worker",
+    "start:cron": "node ./dist/esm/bin.js --role=cron",
+    "migrate": "node ./dist/esm/bin.js --role=migrate",
+    "dev": "tsx ./src/bin.ts",
+    "dev:listener": "tsx ./src/bin.ts --role=listener",
+    "dev:worker": "tsx ./src/bin.ts --role=worker",
+    "dev:cron": "tsx ./src/bin.ts --role=cron",
+    "test": "jest --config ./jest.config.ts",
+    "typecheck": "tsc --noEmit -p ./tsconfig.esm.json",
+    "prettier": "prettier --write ./src ./__tests__"
+  },
+  "dependencies": {
+    "@azure/identity": "^4.4.0",
+    "@azure/keyvault-secrets": "^4.8.0",
+    "ethers": "^6.5.1",
+    "ioredis": "^5.4.0",
+    "pg": "^8.11.0"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.12",
+    "@types/node": "^20.12.2",
+    "@types/pg": "^8.11.0",
+    "jest": "^29.7.0",
+    "pg-mem": "^3.0.0",
+    "ts-jest": "^29.1.2",
+    "tsx": "^4.7.2",
+    "typescript": "^5.1.1"
+  }
+}

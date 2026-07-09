@@ -19,7 +19,10 @@ contract SpecialRelayerTest is Test {
     bytes32 constant DST_ADDR = bytes32(uint256(uint160(address(0xDD57))));
 
     event ExecutionRequested(
-        uint16 indexed dstChain, bytes32 indexed dstAddr, bytes requestBytes, bytes relayInstructions
+        uint16 indexed dstChain,
+        bytes32 indexed dstAddr,
+        bytes requestBytes,
+        bytes relayInstructions
     );
 
     function setUp() public {
@@ -40,15 +43,23 @@ contract SpecialRelayerTest is Test {
         address oracle = address(0xA0A);
         quoter.setOracleService(oracle);
 
-        IPenguinBridgeExecutionQuoter.PricingData memory price = IPenguinBridgeExecutionQuoter.PricingData({
-            dstPrice: uint64(1_000 * 10 ** 10), dstGasPrice: 20 gwei, priceBuffer: 1_000, baseFee: 0.001 ether
-        });
+        IPenguinBridgeExecutionQuoter.PricingData memory price =
+            IPenguinBridgeExecutionQuoter.PricingData({
+                dstPrice: uint64(1_000 * 10 ** 10),
+                dstGasPrice: 20 gwei,
+                priceBuffer: 1_000,
+                baseFee: 0.001 ether
+            });
 
         vm.prank(oracle);
         quoter.priceUpdate(uint64(2_000 * 10 ** 10), CHAIN_ID, price);
 
         uint256 quote = relayer.quoteDeliveryPrice(
-            address(this), CHAIN_ID, 2 ether, bytes32(uint256(uint160(address(0xCAFE)))), abi.encode(uint256(500_000))
+            address(this),
+            CHAIN_ID,
+            2 ether,
+            bytes32(uint256(uint160(address(0xCAFE)))),
+            abi.encode(uint256(500_000))
         );
 
         assertEq(quote, 1 ether + 0.0066 ether);
@@ -93,7 +104,8 @@ contract SpecialRelayerTest is Test {
         freshRelayer.setSourceChainId(SRC_CHAIN_ID);
 
         address signer = vm.addr(QUOTER_PRIVATE_KEY);
-        bytes memory signedQuote = _signedQuote(signer, address(0xFEE1), CHAIN_ID, 0.25 ether, 1 hours);
+        bytes memory signedQuote =
+            _signedQuote(signer, address(0xFEE1), CHAIN_ID, 0.25 ether, 1 hours);
 
         vm.expectRevert(SpecialRelayer.ExecutionQuoterNotSet.selector);
         freshRelayer.requestExecution{value: 0.25 ether}(
@@ -103,7 +115,8 @@ contract SpecialRelayerTest is Test {
 
     function testRequestExecutionRevertsWhenExpired() public {
         address signer = vm.addr(QUOTER_PRIVATE_KEY);
-        bytes memory signedQuote = _signedQuote(signer, address(0xFEE1), CHAIN_ID, 0.25 ether, 1 hours);
+        bytes memory signedQuote =
+            _signedQuote(signer, address(0xFEE1), CHAIN_ID, 0.25 ether, 1 hours);
 
         quoter.addQuoter(signer);
         vm.warp(block.timestamp + 2 hours);
@@ -116,7 +129,8 @@ contract SpecialRelayerTest is Test {
 
     function testRequestExecutionRevertsWhenSignerUnauthorized() public {
         address signer = vm.addr(QUOTER_PRIVATE_KEY);
-        bytes memory signedQuote = _signedQuote(signer, address(0xFEE1), CHAIN_ID, 0.25 ether, 1 hours);
+        bytes memory signedQuote =
+            _signedQuote(signer, address(0xFEE1), CHAIN_ID, 0.25 ether, 1 hours);
 
         vm.expectRevert(abi.encodeWithSelector(SpecialRelayer.InvalidQuoteSigner.selector, signer));
         relayer.requestExecution{value: 0.25 ether}(
@@ -128,13 +142,16 @@ contract SpecialRelayerTest is Test {
         address signer = vm.addr(QUOTER_PRIVATE_KEY);
         // Quote signed for a different source chain than this relayer is deployed on.
         uint16 wrongSrcChain = SRC_CHAIN_ID + 1;
-        bytes memory signedQuote =
-            _signedQuoteWithSrc(signer, address(0xFEE1), wrongSrcChain, CHAIN_ID, 0.25 ether, 1 hours);
+        bytes memory signedQuote = _signedQuoteWithSrc(
+            signer, address(0xFEE1), wrongSrcChain, CHAIN_ID, 0.25 ether, 1 hours
+        );
 
         quoter.addQuoter(signer);
 
         vm.expectRevert(
-            abi.encodeWithSelector(SpecialRelayer.InvalidQuoteSourceChain.selector, SRC_CHAIN_ID, wrongSrcChain)
+            abi.encodeWithSelector(
+                SpecialRelayer.InvalidQuoteSourceChain.selector, SRC_CHAIN_ID, wrongSrcChain
+            )
         );
         relayer.requestExecution{value: 0.25 ether}(
             CHAIN_ID, DST_ADDR, address(0), signedQuote, bytes(""), abi.encode(DEFAULT_GAS_LIMIT)
@@ -143,16 +160,24 @@ contract SpecialRelayerTest is Test {
 
     function testRequestExecutionRevertsOnWrongDestinationChain() public {
         address signer = vm.addr(QUOTER_PRIVATE_KEY);
-        bytes memory signedQuote = _signedQuote(signer, address(0xFEE1), CHAIN_ID, 0.25 ether, 1 hours);
+        bytes memory signedQuote =
+            _signedQuote(signer, address(0xFEE1), CHAIN_ID, 0.25 ether, 1 hours);
 
         quoter.addQuoter(signer);
 
         uint16 paramDstChain = CHAIN_ID + 1;
         vm.expectRevert(
-            abi.encodeWithSelector(SpecialRelayer.InvalidQuoteTargetChain.selector, paramDstChain, CHAIN_ID)
+            abi.encodeWithSelector(
+                SpecialRelayer.InvalidQuoteTargetChain.selector, paramDstChain, CHAIN_ID
+            )
         );
         relayer.requestExecution{value: 0.25 ether}(
-            paramDstChain, DST_ADDR, address(0), signedQuote, bytes(""), abi.encode(DEFAULT_GAS_LIMIT)
+            paramDstChain,
+            DST_ADDR,
+            address(0),
+            signedQuote,
+            bytes(""),
+            abi.encode(DEFAULT_GAS_LIMIT)
         );
     }
 
@@ -162,7 +187,8 @@ contract SpecialRelayerTest is Test {
         freshRelayer.setExecutionQuoter(address(quoter));
 
         address signer = vm.addr(QUOTER_PRIVATE_KEY);
-        bytes memory signedQuote = _signedQuote(signer, address(0xFEE1), CHAIN_ID, 0.25 ether, 1 hours);
+        bytes memory signedQuote =
+            _signedQuote(signer, address(0xFEE1), CHAIN_ID, 0.25 ether, 1 hours);
 
         vm.expectRevert(SpecialRelayer.SourceChainIdNotSet.selector);
         freshRelayer.requestExecution{value: 0.25 ether}(
@@ -172,13 +198,16 @@ contract SpecialRelayerTest is Test {
 
     function testRequestExecutionRevertsOnGasLimitMismatch() public {
         address signer = vm.addr(QUOTER_PRIVATE_KEY);
-        bytes memory signedQuote = _signedQuote(signer, address(0xFEE1), CHAIN_ID, 0.25 ether, 1 hours);
+        bytes memory signedQuote =
+            _signedQuote(signer, address(0xFEE1), CHAIN_ID, 0.25 ether, 1 hours);
         quoter.addQuoter(signer);
 
         uint256 wrongGasLimit = DEFAULT_GAS_LIMIT + 1;
         vm.expectRevert(
             abi.encodeWithSelector(
-                SpecialRelayer.RelayInstructionsGasLimitMismatch.selector, DEFAULT_GAS_LIMIT, wrongGasLimit
+                SpecialRelayer.RelayInstructionsGasLimitMismatch.selector,
+                DEFAULT_GAS_LIMIT,
+                wrongGasLimit
             )
         );
         relayer.requestExecution{value: 0.25 ether}(
@@ -205,7 +234,9 @@ contract SpecialRelayerTest is Test {
             CHAIN_ID, DST_ADDR, address(0), signedQuote, bytes(""), abi.encode(DEFAULT_GAS_LIMIT)
         );
 
-        assertEq(payee.balance, payeeBalanceBefore + required, "payee receives only the quoted amount");
+        assertEq(
+            payee.balance, payeeBalanceBefore + required, "payee receives only the quoted amount"
+        );
         assertEq(user.balance, overpay, "caller is refunded the excess");
         assertEq(address(relayer).balance, 0, "relayer holds nothing");
     }
@@ -215,7 +246,8 @@ contract SpecialRelayerTest is Test {
         // Payee with non-zero high bits — not a valid EVM address.
         bytes32 invalidPayee = bytes32(uint256(1 << 200) | uint256(uint160(address(0xFEE1))));
         uint256 required = 0.25 ether;
-        bytes memory signedQuote = _signedQuoteRawPayee(signer, invalidPayee, SRC_CHAIN_ID, CHAIN_ID, required, 1 hours);
+        bytes memory signedQuote =
+            _signedQuoteRawPayee(signer, invalidPayee, SRC_CHAIN_ID, CHAIN_ID, required, 1 hours);
 
         quoter.addQuoter(signer);
 
@@ -223,7 +255,9 @@ contract SpecialRelayerTest is Test {
         vm.deal(user, required);
 
         vm.prank(user);
-        vm.expectRevert(abi.encodeWithSelector(SpecialRelayer.InvalidPayeeAddress.selector, invalidPayee));
+        vm.expectRevert(
+            abi.encodeWithSelector(SpecialRelayer.InvalidPayeeAddress.selector, invalidPayee)
+        );
         relayer.requestExecution{value: required}(
             CHAIN_ID, DST_ADDR, address(0), signedQuote, bytes(""), abi.encode(DEFAULT_GAS_LIMIT)
         );
@@ -276,12 +310,15 @@ contract SpecialRelayerTest is Test {
         assertEq(address(relayer).balance, 0);
     }
 
-    function _signedQuote(address signer, address payee, uint16 dstChain, uint256 requiredPayment, uint64 expiresIn)
-        internal
-        view
-        returns (bytes memory)
-    {
-        return _signedQuoteWithSrc(signer, payee, SRC_CHAIN_ID, dstChain, requiredPayment, expiresIn);
+    function _signedQuote(
+        address signer,
+        address payee,
+        uint16 dstChain,
+        uint256 requiredPayment,
+        uint64 expiresIn
+    ) internal view returns (bytes memory) {
+        return
+            _signedQuoteWithSrc(signer, payee, SRC_CHAIN_ID, dstChain, requiredPayment, expiresIn);
     }
 
     function _signedQuoteWithSrc(
