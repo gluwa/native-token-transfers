@@ -41,8 +41,14 @@ export type {
   RpcOracleWriterOptions,
 } from "./oracle.js";
 
-export { readActiveMode, runTick, startRunner } from "./runner.js";
+export {
+  readActiveMode,
+  readActivePricing,
+  runTick,
+  startRunner,
+} from "./runner.js";
 export type {
+  ActivePricing,
   RunnerDeps,
   RunnerHandle,
   RunnerLogger,

@@ -266,6 +266,39 @@ describe("RpcOracleWriter.pricingMode", () => {
   });
 });
 
+describe("RpcOracleWriter.hasAttestCtcPool", () => {
+  const POOL_PATH_SELECTOR = iface.getFunction("attestCtcPath")!.selector;
+
+  it("detects a configured pool and the empty-path TWAPReader fallback", async () => {
+    const configuredPool = "0x" + "3".repeat(40);
+    const handler =
+      (configured: boolean): RpcHandler =>
+      (req) => {
+        if (req.method === "eth_chainId") return "0x7a69";
+        if (req.method === "eth_call") {
+          const data = (req.params as Array<{ data: string }>)[0]!.data;
+          if (data.slice(0, 10) !== POOL_PATH_SELECTOR) {
+            throw new Error(`unexpected eth_call ${data.slice(0, 10)}`);
+          }
+          if (!configured) throw new JsonRpcError(3, "array out of bounds");
+          return iface.encodeFunctionResult("attestCtcPath", [configuredPool]);
+        }
+        throw new Error(`unexpected RPC method ${req.method}`);
+      };
+
+    await withMockRpc(handler(true), async (url) => {
+      await withWriter({ rpcUrl: url }, async (w) => {
+        await expect(w.hasAttestCtcPool()).resolves.toBe(true);
+      });
+    });
+    await withMockRpc(handler(false), async (url) => {
+      await withWriter({ rpcUrl: url }, async (w) => {
+        await expect(w.hasAttestCtcPool()).resolves.toBe(false);
+      });
+    });
+  });
+});
+
 describe("batchPriceUpdate ABI", () => {
   it("encodes/decodes with PricingData fields in (baseFee, dstGasPrice, dstPrice, srcPrice, priceBuffer) order", () => {
     // Field order mirrors IUSCRelayingQuoter.PricingData exactly.

@@ -118,7 +118,7 @@ export class CoinGeckoPriceSource implements PriceSource {
   }
 }
 
-interface Sample {
+interface TwapSample {
   t: number;
   price: number;
 }
@@ -130,7 +130,7 @@ interface Sample {
 /// waiting a full tick to influence the push. This is the "TWAP pricing data" shared by
 /// both modes.
 export class TwapAggregator {
-  private readonly samples = new Map<string, Sample[]>();
+  private readonly samples = new Map<string, TwapSample[]>();
 
   constructor(
     private readonly windowMs: number,

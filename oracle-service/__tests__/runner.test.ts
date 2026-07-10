@@ -57,7 +57,8 @@ function gasReaderStub(byChain: Record<number, bigint>): GasPriceReader {
 /// `pricingMode` mimics the contract getter: it returns the current mode, or throws to
 /// simulate an RPC error / a contract that doesn't expose the getter.
 function writerSpy(
-  pricingMode: () => Promise<PricingMode> = async () => "penguinswap"
+  pricingMode: () => Promise<PricingMode> = async () => "penguinswap",
+  hasAttestCtcPool: () => Promise<boolean> = async () => true
 ): OracleWriter & {
   calls: Array<{ sourcePrice: bigint; updates: ChainPriceUpdate[] }>;
   twapSamples: bigint[];
@@ -70,6 +71,7 @@ function writerSpy(
     assertAuthorized: async () => undefined,
     assertTwapReaderAuthorized: async () => undefined,
     pricingMode,
+    hasAttestCtcPool,
     pushPrices: async (sourcePrice, updates) => {
       calls.push({ sourcePrice, updates });
       return "0xhash";
@@ -134,6 +136,32 @@ describe("runTick", () => {
     expect(result.ctcPerAttest).toBe(10n ** 25n);
     expect(writer.twapSamples).toEqual([10n ** 25n]);
     expect(result.twapTxHash).toBe("0xtwaphash");
+    expect(result.usesTwapReader).toBe(true);
+  });
+
+  it("uses the TWAPReader fallback in penguinswap mode when no ATTEST/CTC pool is configured", async () => {
+    const writer = writerSpy(
+      async () => "penguinswap",
+      async () => false
+    );
+    const priceSource = priceSourceStub({
+      "creditcoin-2": 0.5,
+      attestcoin: 5_000_000,
+      ethereum: 3000,
+    });
+    const result = await runTick({
+      config: makeConfig({ attestTokenId: "attestcoin" }),
+      priceSource,
+      twap: spotTwap(),
+      gasReader: gasReaderStub({ 2: 1n }),
+      writer,
+    });
+
+    expect(result.mode).toBe("penguinswap");
+    expect(result.usesTwapReader).toBe(true);
+    expect(result.ctcPerAttest).toBe(usdRatioWad(5_000_000, 0.5));
+    expect(writer.twapSamples).toEqual([usdRatioWad(5_000_000, 0.5)]);
+    expect(priceSource.requested[0]).toContain("attestcoin");
   });
 
   it("pushes a spot ratio to TWAPReader instead of time-weighting the price twice", async () => {
@@ -234,6 +262,16 @@ describe("runTick", () => {
     ).rejects.toThrow(/ORACLE_ATTEST_TOKEN_ID/);
     expect(writer.calls).toHaveLength(0);
     expect(writer.twapSamples).toHaveLength(0);
+  });
+
+  it("skips the penguinswap fallback when no ATTEST token id is configured", async () => {
+    const writer = writerSpy(
+      async () => "penguinswap",
+      async () => false
+    );
+    await expect(readActiveMode(writer, makeConfig())).rejects.toThrow(
+      /PenguinSwap fallback/
+    );
   });
 
   it("skips the push (throws) when a required price is missing", async () => {

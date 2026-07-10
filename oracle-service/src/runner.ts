@@ -30,32 +30,51 @@ export interface RunnerDeps {
 
 export interface TickResult {
   txHash: string;
-  /// TWAPReader.update() tx hash — only set when the tick ran under twap mode.
+  /// TWAPReader.update() tx hash — set whenever the quoter uses the reader.
   twapTxHash: string | undefined;
   sourcePrice: bigint;
-  /// ctcPerAttest pushed to the TWAPReader (1e18 fp) — only under twap mode.
+  /// ctcPerAttest pushed to the TWAPReader (1e18 fp), when it is active.
   ctcPerAttest: bigint | undefined;
   updates: ChainPriceUpdate[];
   /// Mode this tick priced under, read from the contract.
   mode: PricingMode;
+  /// Whether this tick updated TWAPReader. This is true in TWAP mode and when
+  /// PenguinSwap mode has no configured ATTEST→CTC path (the quoter's fallback).
+  usesTwapReader: boolean;
+}
+
+export interface ActivePricing {
+  mode: PricingMode;
+  usesTwapReader: boolean;
 }
 
 /// Read the contract's current pricing mode and confirm the CoinGecko ids it needs are
 /// configured. Throws — so the tick is skipped (or startup aborts) — if the contract
-/// read fails or twap mode is active without an ATTEST id. The mode is read fresh
-/// every tick because the oracleService key can toggle it on-chain at any time.
+/// read fails or the active ATTEST/CTC source needs an unset ATTEST id. The mode is
+/// read fresh every tick because the oracleService key can toggle it on-chain at any time.
 export async function readActiveMode(
   writer: OracleWriter,
   config: OracleServiceConfig
 ): Promise<PricingMode> {
+  return (await readActivePricing(writer, config)).mode;
+}
+
+/// Read the active mode plus the quoter's actual ATTEST/CTC source. PenguinSwap mode
+/// uses TWAPReader as a documented contract fallback when no ATTEST→CTC pool path has
+/// been configured, so it needs the same ATTEST/USD input and reader update as TWAP.
+export async function readActivePricing(
+  writer: OracleWriter,
+  config: OracleServiceConfig
+): Promise<ActivePricing> {
   const mode = await writer.pricingMode();
-  if (mode === "twap" && !config.attestTokenId) {
+  const usesTwapReader = mode === "twap" || !(await writer.hasAttestCtcPool());
+  if (usesTwapReader && !config.attestTokenId) {
     throw new Error(
-      `active pricing mode is "twap" but ORACLE_ATTEST_TOKEN_ID is unset — ` +
-        `twap mode needs the ATTEST/USD leg to derive ctcPerAttest`
+      `active pricing mode is "${mode}" but ORACLE_ATTEST_TOKEN_ID is unset — ` +
+        `${mode === "twap" ? "twap mode" : "PenguinSwap fallback"} needs the ATTEST/USD leg to derive ctcPerAttest`
     );
   }
-  return mode;
+  return { mode, usesTwapReader };
 }
 
 /// Run a single read-mode → fetch → time-weight → assemble → push cycle. Throws if the
@@ -63,21 +82,21 @@ export async function readActiveMode(
 /// than pushing partial or stale data — the contract retains its previous values.
 ///
 /// Both modes push CTC/USD as the `sourcePrice` anchor (and per-chain `srcPrice`) and
-/// native/USD as `dstPrice`. Under twap mode the tick ALSO pushes a spot ctcPerAttest
-/// observation into the on-chain TWAPReader — that plus the anchor is how the quoter
-/// reconstructs ATTEST/USD (attestUsd = sourcePrice × twapReader.read() / 1e18).
+/// native/USD as `dstPrice`. Whenever the quoter uses TWAPReader, the tick ALSO pushes a
+/// spot ctcPerAttest observation — that plus the anchor is how it reconstructs ATTEST/USD
+/// (attestUsd = sourcePrice × twapReader.read() / 1e18).
 export async function runTick(deps: RunnerDeps): Promise<TickResult> {
   const { config, priceSource, twap, gasReader, writer } = deps;
 
   // 1. Read the contract's current pricing mode (re-read every tick — it can be toggled
   //    on-chain at any time).
-  const mode = await readActiveMode(writer, config);
+  const { mode, usesTwapReader } = await readActivePricing(writer, config);
 
-  // 2. Fetch every USD leg in one call: CTC (always), ATTEST (twap mode), and each
-  //    chain's native token.
+  // 2. Fetch every USD leg in one call: CTC (always), ATTEST (when TWAPReader is
+  //    active), and each chain's native token.
   const ids = [
     config.ctcTokenId,
-    ...(mode === "twap" ? [config.attestTokenId!] : []),
+    ...(usesTwapReader ? [config.attestTokenId!] : []),
     ...config.chains.map((c) => c.coingeckoId),
   ];
   const prices = await priceSource.fetchUsdPrices(ids);
@@ -111,13 +130,12 @@ export async function runTick(deps: RunnerDeps): Promise<TickResult> {
     })
   );
 
-  // 6. Twap mode: push the ctcPerAttest observation first — it's an independent spot
-  //    sample of a real market price, so it's valid even if the batch push below
-  //    fails; the reverse (fresh anchor, stale reader) is the pairing we'd rather
-  //    avoid aging further.
+  // 6. When active, push the ctcPerAttest observation first — it's an independent spot
+  //    sample of a real market price, so it's valid even if the batch push below fails;
+  //    the reverse (fresh anchor, stale reader) is the pairing we'd rather avoid aging.
   let twapTxHash: string | undefined;
   let ctcPerAttest: bigint | undefined;
-  if (mode === "twap") {
+  if (usesTwapReader) {
     // TWAPReader performs the time weighting on-chain and explicitly expects a spot
     // observation. Do not feed it the ratio of our already-smoothed USD legs: doing so
     // would apply two averaging windows and make ATTEST pricing lag unnecessarily.
@@ -130,7 +148,15 @@ export async function runTick(deps: RunnerDeps): Promise<TickResult> {
 
   // 7. One atomic batchPriceUpdate.
   const txHash = await writer.pushPrices(sourcePrice, updates);
-  return { txHash, twapTxHash, sourcePrice, ctcPerAttest, updates, mode };
+  return {
+    txHash,
+    twapTxHash,
+    sourcePrice,
+    ctcPerAttest,
+    updates,
+    mode,
+    usesTwapReader,
+  };
 }
 
 export interface RunnerHandle {

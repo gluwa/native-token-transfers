@@ -42,6 +42,9 @@ export interface OracleWriter {
   /// isn't the required quoter). Callers surface the error: skip the tick at runtime,
   /// abort at startup.
   pricingMode(): Promise<PricingMode>;
+  /// True when PenguinSwap has a configured ATTEST→CTC path. An empty path makes the
+  /// quoter fall back to TWAPReader even while pricingMode() is PENGUIN_SWAP.
+  hasAttestCtcPool(): Promise<boolean>;
   /// Push the CTC/USD anchor and per-chain pricing in one batchPriceUpdate tx. Returns
   /// the transaction hash. NOT internally retried — a transient send failure skips the
   /// tick and the next interval overwrites prices anyway, so we never risk a double
@@ -66,6 +69,7 @@ export interface GasPriceReader {
 export const QUOTER_WRITE_ABI = [
   "function oracleService() view returns (address)",
   "function pricingMode() view returns (uint8)",
+  "function attestCtcPath(uint256) view returns (address)",
   "function twapReader() view returns (address)",
   "function batchPriceUpdate(uint64 newSourcePrice, uint16[] chainIds, tuple(uint256 baseFee, uint256 dstGasPrice, uint256 dstPrice, uint256 srcPrice, uint16 priceBuffer)[] prices)",
 ];
@@ -222,6 +226,22 @@ export class RpcOracleWriter implements OracleWriter {
     throw new Error(`contract returned unknown pricingMode ${raw}`);
   }
 
+  async hasAttestCtcPool(): Promise<boolean> {
+    try {
+      const firstPool = (await withRetry(
+        () => this.contract["attestCtcPath"]!(0) as Promise<string>,
+        this.retry,
+        this.sleep
+      )) as string;
+      return getAddress(firstPool) !== ZeroAddress;
+    } catch (err) {
+      // Solidity's generated getter reverts when index 0 is out of bounds, which is
+      // exactly how the current quoter exposes an empty dynamic pool path.
+      if ((err as { code?: unknown }).code === "CALL_EXCEPTION") return false;
+      throw err;
+    }
+  }
+
   async pushPrices(
     sourcePrice: bigint,
     updates: ChainPriceUpdate[]
@@ -287,6 +307,25 @@ export class RpcOracleWriter implements OracleWriter {
     if (!Number.isSafeInteger(nonce)) {
       throw new RangeError(
         `account nonce ${rawNonce} exceeds JavaScript safe integer range`
+      );
+    }
+    const rawPendingNonce = (await this.provider.send(
+      "eth_getTransactionCount",
+      [this.wallet.address, "pending"]
+    )) as string;
+    const pendingNonce = Number(BigInt(rawPendingNonce));
+    if (!Number.isSafeInteger(pendingNonce)) {
+      throw new RangeError(
+        `pending account nonce ${rawPendingNonce} exceeds JavaScript safe integer range`
+      );
+    }
+    // A fresh serverless instance cannot know the fees of an already-pending tx. Do
+    // not reuse its nonce blindly: that may produce an underpriced replacement or
+    // replace an operator transaction. Wait for the unknown tx to mine or drop.
+    if (!this.lastSent && pendingNonce > nonce) {
+      throw new Error(
+        `oracle account has ${pendingNonce - nonce} unknown pending transaction(s); ` +
+          `waiting rather than replacing a transaction whose fees are unavailable after restart`
       );
     }
     if (this.lastMinedNonce !== undefined && nonce <= this.lastMinedNonce) {

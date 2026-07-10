@@ -231,20 +231,19 @@ maybe(
       }
     }, 60_000);
 
-    it("a penguinswap-mode tick pushes prices but no TWAPReader sample", async () => {
+    it("a penguinswap-mode tick updates the TWAPReader fallback when no pool path is configured", async () => {
       // Toggle on-chain — setPricingMode is onlyOracle and re-anchors atomically.
       // The writer has sent txs from this key since deployment; resync the manager.
       deployer.reset();
       await (await quoterContract.setPricingMode(1, usdToScaled(0.4))).wait();
 
-      const readerTsBefore =
-        (await twapReaderContract.lastTimestamp()) as bigint;
       const gasReader = new RpcGasPriceReader(chains());
       try {
         const result = await runTick({
           config: tickConfig(),
           priceSource: stubPriceSource({
             "creditcoin-2": 0.6,
+            attestcoin: 9_000_000,
             ethereum: 3100,
           }),
           twap: new TwapAggregator(0),
@@ -253,16 +252,18 @@ maybe(
         });
 
         expect(result.mode).toBe("penguinswap");
-        expect(result.twapTxHash).toBeUndefined();
+        expect(result.usesTwapReader).toBe(true);
+        expect(result.twapTxHash).toBeDefined();
         expect((await quoterContract.sourcePrice()) as bigint).toBe(
           usdToScaled(0.6)
         );
         const pd = await quoterContract.pricingData(DST_CHAIN);
         expect(pd.dstPrice).toBe(usdToScaled(3100));
         expect(pd.srcPrice).toBe(usdToScaled(0.6));
-        // No reader write happened.
-        expect((await twapReaderContract.lastTimestamp()) as bigint).toBe(
-          readerTsBefore
+        // The real quoter uses TWAPReader when its ATTEST/CTC pool path is empty, so
+        // the service must keep that fallback fresh in PenguinSwap mode.
+        expect((await twapReaderContract.lastPrice()) as bigint).toBe(
+          usdRatioWad(9_000_000, 0.6)
         );
       } finally {
         gasReader.dispose();
@@ -352,6 +353,48 @@ maybe(
         // Flush any stranded tx so it can't bleed into other tests.
         await provider.send("evm_mine", []);
         stuckWriter.dispose();
+      }
+    }, 30_000);
+
+    it("does not blindly replace a pending transaction after a stateless restart", async () => {
+      const makeWriter = (): RpcOracleWriter =>
+        new RpcOracleWriter({
+          rpcUrl: anvil.rpcUrl,
+          contractAddress: quoterAddress,
+          signingKey: new Wallet(DEPLOYER_KEY).signingKey,
+          staticNetwork: true,
+          txWaitTimeoutMs: 1_000,
+        });
+      const beforeRestart = makeWriter();
+      let afterRestart: RpcOracleWriter | undefined;
+      const updates = [
+        {
+          chainId: DST_CHAIN,
+          pricing: {
+            baseFee: 0n,
+            dstGasPrice: 1n,
+            dstPrice: usdToScaled(3000),
+            srcPrice: usdToScaled(0.5),
+            priceBuffer: 0n,
+          },
+        },
+      ];
+      try {
+        await provider.send("anvil_setAutomine", [false]);
+        await expect(
+          beforeRestart.pushPrices(usdToScaled(0.5), updates)
+        ).rejects.toMatchObject({ code: "TIMEOUT" });
+        beforeRestart.dispose();
+
+        afterRestart = makeWriter();
+        await expect(
+          afterRestart.pushPrices(usdToScaled(0.6), updates)
+        ).rejects.toThrow(/unknown pending transaction/);
+      } finally {
+        await provider.send("anvil_setAutomine", [true]);
+        await provider.send("evm_mine", []);
+        beforeRestart.dispose();
+        afterRestart?.dispose();
       }
     }, 30_000);
   }

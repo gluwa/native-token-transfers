@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { writeFileSync } from "node:fs";
 
-import { loadConfig, type PricingMode } from "./config.js";
+import { loadConfig } from "./config.js";
 import {
   OracleNotAuthorizedError,
   RpcGasPriceReader,
@@ -12,7 +12,7 @@ import {
   type PriceSource,
   TwapAggregator,
 } from "./priceSource.js";
-import { readActiveMode, startRunner } from "./runner.js";
+import { readActivePricing, startRunner } from "./runner.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -52,9 +52,9 @@ async function main(): Promise<void> {
   // Read the contract's current mode once at startup the same way every tick will, so
   // we fail fast if the contract isn't the required quoter (no pricingMode() getter) or
   // twap mode is active without an ATTEST token id, rather than skipping every tick.
-  let initialMode: PricingMode;
+  let initialPricing: Awaited<ReturnType<typeof readActivePricing>>;
   try {
-    initialMode = await readActiveMode(writer, config);
+    initialPricing = await readActivePricing(writer, config);
   } catch (err) {
     console.error(
       `startup mode detection failed: ${err instanceof Error ? err.message : String(err)}`
@@ -64,11 +64,10 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Twap mode pushes into the quoter's TWAPReader every tick — verify at startup that
-  // the reader is configured and gates update() behind OUR key (its oracleService is
-  // set independently of the quoter's). Only checked when twap is the active mode; a
-  // later on-chain toggle to twap surfaces the same error per tick.
-  if (initialMode === "twap") {
+  // Both TWAP mode and PenguinSwap without an ATTEST/CTC pool path push into the
+  // quoter's TWAPReader. Verify that the reader is configured and gates update() behind
+  // this key (its oracleService is set independently of the quoter's).
+  if (initialPricing.usesTwapReader) {
     try {
       await writer.assertTwapReaderAuthorized(config.oracleAddress);
     } catch (err) {
@@ -95,7 +94,9 @@ async function main(): Promise<void> {
   });
 
   console.log(
-    `oracle-service started (mode=${initialMode}, ctc=${config.ctcTokenId}, ` +
+    `oracle-service started (mode=${initialPricing.mode}, ` +
+      `attestSource=${initialPricing.usesTwapReader ? "TWAPReader" : "PenguinSwap"}, ` +
+      `ctc=${config.ctcTokenId}, ` +
       `attest=${config.attestTokenId ?? "unset"}, ` +
       `chains=${config.chains.map((c) => c.chainId).join(",")}, ` +
       `interval=${config.pushIntervalMs}ms, contract=${config.contractAddress})`
