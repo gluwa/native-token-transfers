@@ -10,6 +10,7 @@ export {
   PRICE_SCALE,
   WAD,
   assertUint16,
+  assertUint256,
   assertUint64,
   usdRatioWad,
   usdToScaled,

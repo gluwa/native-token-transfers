@@ -8,6 +8,7 @@
 export const PRICE_DECIMALS = 10;
 export const PRICE_SCALE = 10n ** BigInt(PRICE_DECIMALS);
 const UINT64_MAX = 2n ** 64n - 1n;
+const UINT256_MAX = 2n ** 256n - 1n;
 
 /// Scale a non-negative decimal string by `decimals` digits, rounding half-up on any
 /// excess precision. Throws on malformed input.
@@ -58,13 +59,24 @@ export function usdToScaled(price: number | string): bigint {
   return scaled;
 }
 
-/// Assert a wei-denominated value (gas price, base fee) fits the contract's `uint64`.
+/// Assert a value fits the EVM's `uint64` range.
 export function assertUint64(value: bigint, label: string): bigint {
   if (value < 0n) {
     throw new RangeError(`${label} must be non-negative, got ${value}`);
   }
   if (value > UINT64_MAX) {
     throw new RangeError(`${label} ${value} exceeds uint64`);
+  }
+  return value;
+}
+
+/// Assert a value fits the EVM's `uint256` range.
+export function assertUint256(value: bigint, label: string): bigint {
+  if (value < 0n) {
+    throw new RangeError(`${label} must be non-negative, got ${value}`);
+  }
+  if (value > UINT256_MAX) {
+    throw new RangeError(`${label} ${value} exceeds uint256`);
   }
   return value;
 }

@@ -118,9 +118,12 @@ export async function runTick(deps: RunnerDeps): Promise<TickResult> {
   let twapTxHash: string | undefined;
   let ctcPerAttest: bigint | undefined;
   if (mode === "twap") {
+    // TWAPReader performs the time weighting on-chain and explicitly expects a spot
+    // observation. Do not feed it the ratio of our already-smoothed USD legs: doing so
+    // would apply two averaging windows and make ATTEST pricing lag unnecessarily.
     ctcPerAttest = usdRatioWad(
-      twap.average(config.attestTokenId!),
-      twap.average(config.ctcTokenId)
+      prices.get(config.attestTokenId!)!,
+      prices.get(config.ctcTokenId)!
     );
     twapTxHash = await writer.pushTwapSample(ctcPerAttest);
   }

@@ -10,7 +10,7 @@ Every `ORACLE_PUSH_INTERVAL_MS` it runs one tick:
 2. Fetches USD spot prices from **CoinGecko** (`/simple/price`) in a single request: **CTC** (always), **ATTEST** (twap mode only), and every configured destination chain's native token.
 3. Feeds each price into a rolling **time-weighted average** over `ORACLE_TWAP_WINDOW_MS` (falls back to spot until the window fills). Each sample is weighted by the interval it closes, so a fresh fetch influences the push immediately.
 4. Reads current gas price from each destination chain's RPC.
-5. **Twap mode only:** pushes a spot `ctcPerAttest` observation (`attestUsd / ctcUsd`, 1e18 fixed point) into the quoter's **`TWAPReader`** via `update()` — the reader address is re-read from the quoter each tick, so an owner-side `setTWAPReader()` rotation needs no restart.
+5. **Twap mode only:** pushes a spot `ctcPerAttest` observation (the latest fetched `attestUsd / ctcUsd`, 1e18 fixed point) into the quoter's **`TWAPReader`** via `update()` — the reader performs the ATTEST/CTC time weighting on-chain, so this observation deliberately bypasses the service's rolling USD averages. The reader address is re-read from the quoter each tick, so an owner-side `setTWAPReader()` rotation needs no restart.
 6. Writes `sourcePrice` (**CTC/USD ×1e10** — the mode-independent anchor) + per-chain `PricingData {baseFee, dstGasPrice, dstPrice, srcPrice, priceBuffer}` in one `batchPriceUpdate` transaction. `srcPrice` carries the same CTC/USD value per chain. Receipt waits are bounded by `ORACLE_TX_WAIT_TIMEOUT_MS` so a stuck transaction can't hang the loop.
 
 All reads (prices + gas) complete **before** anything is pushed: if any read fails, the whole tick is skipped (logged) and the contract keeps its previous values rather than receiving partial/stale data. In twap mode the reader push precedes the batch push; a spot observation is valid on its own, so a batch failure after it does no harm.
@@ -68,7 +68,7 @@ All config is via environment variables:
 ]
 ```
 
-- `chainId` — Wormhole chain id (uint16); a JSON number.
+- `chainId` — Wormhole chain id (non-zero uint16); a JSON number.
 - `rpcUrl` — destination-chain RPC, read for current gas price.
 - `coingeckoId` — CoinGecko id of the native token.
 - `priceBuffer` — per-chain upward adjustment in **parts per 100,000** (the contract's `BPS_DENOMINATOR = 100_000`, so `"500"` = +0.5%). uint16 on-chain, max `65535` (+65.5%). **Decimal string**; omit for 0.

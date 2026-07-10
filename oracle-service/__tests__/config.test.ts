@@ -74,6 +74,18 @@ describe("loadConfig", () => {
     expect(() => loadConfig(env)).toThrow(/ORACLE_PRIVATE_KEY/);
   });
 
+  it("does not echo a malformed private key in configuration errors", () => {
+    const malformedSecret = "not-a-secret-value";
+    let message = "";
+    try {
+      loadConfig({ ...baseEnv(), ORACLE_PRIVATE_KEY: malformedSecret });
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toMatch(/ORACLE_PRIVATE_KEY/);
+    expect(message).not.toContain(malformedSecret);
+  });
+
   it("rejects malformed ORACLE_CHAINS", () => {
     expect(() => loadConfig({ ...baseEnv(), ORACLE_CHAINS: "{" })).toThrow(
       /valid JSON/
@@ -87,6 +99,14 @@ describe("loadConfig", () => {
   });
 
   it("rejects out-of-range chainId and duplicates", () => {
+    expect(() =>
+      loadConfig({
+        ...baseEnv(),
+        ORACLE_CHAINS: JSON.stringify([
+          { chainId: 0, rpcUrl: "x", coingeckoId: "y" },
+        ]),
+      })
+    ).toThrow(/non-zero uint16/);
     expect(() =>
       loadConfig({
         ...baseEnv(),
@@ -208,6 +228,22 @@ describe("loadConfig", () => {
       ]),
     });
     expect(cfg.chains[0]!.baseFee).toBe(10n ** 20n);
+  });
+
+  it("rejects a baseFee that exceeds uint256", () => {
+    expect(() =>
+      loadConfig({
+        ...baseEnv(),
+        ORACLE_CHAINS: JSON.stringify([
+          {
+            chainId: 2,
+            rpcUrl: "x",
+            coingeckoId: "ethereum",
+            baseFee: (2n ** 256n).toString(),
+          },
+        ]),
+      })
+    ).toThrow(/exceeds uint256/);
   });
 
   it("treats empty-string numeric env vars as unset, not zero", () => {

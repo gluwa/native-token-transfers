@@ -1,6 +1,6 @@
 import { SigningKey, Wallet, getAddress } from "ethers";
 
-import { assertUint16 } from "./scaling.js";
+import { assertUint16, assertUint256 } from "./scaling.js";
 import type { RetryOptions } from "./retry.js";
 
 /// How the quoter derives the ATTEST↔native rate (read from `pricingMode()`; enum
@@ -137,10 +137,10 @@ function parseChains(raw: string): ChainConfig[] {
     if (
       typeof chainId !== "number" ||
       !Number.isInteger(chainId) ||
-      chainId < 0 ||
+      chainId <= 0 ||
       chainId > 0xffff
     ) {
-      throw new Error(`ORACLE_CHAINS[${i}].chainId must be a uint16`);
+      throw new Error(`ORACLE_CHAINS[${i}].chainId must be a non-zero uint16`);
     }
     if (seen.has(chainId)) {
       throw new Error(`ORACLE_CHAINS has duplicate chainId ${chainId}`);
@@ -164,7 +164,10 @@ function parseChains(raw: string): ChainConfig[] {
         parseAmountField(`ORACLE_CHAINS[${i}].priceBuffer`, c.priceBuffer),
         `ORACLE_CHAINS[${i}].priceBuffer`
       ),
-      baseFee: parseAmountField(`ORACLE_CHAINS[${i}].baseFee`, c.baseFee),
+      baseFee: assertUint256(
+        parseAmountField(`ORACLE_CHAINS[${i}].baseFee`, c.baseFee),
+        `ORACLE_CHAINS[${i}].baseFee`
+      ),
     };
   });
 }
@@ -172,7 +175,17 @@ function parseChains(raw: string): ChainConfig[] {
 export function loadConfig(
   env: NodeJS.ProcessEnv = process.env
 ): OracleServiceConfig {
-  const wallet = new Wallet(required(env, "ORACLE_PRIVATE_KEY"));
+  // ethers includes the rejected BytesLike value in INVALID_ARGUMENT errors. Do not
+  // let a malformed production secret get echoed into container logs.
+  const privateKey = required(env, "ORACLE_PRIVATE_KEY");
+  let wallet: Wallet;
+  try {
+    wallet = new Wallet(privateKey);
+  } catch {
+    throw new Error(
+      "ORACLE_PRIVATE_KEY must be a valid 32-byte secp256k1 private key"
+    );
+  }
 
   // CTC is priced every tick regardless of mode (sourcePrice anchor + per-chain
   // srcPrice). ATTEST is only needed while the contract is in twap mode — the mode is

@@ -275,7 +275,20 @@ export class RpcOracleWriter implements OracleWriter {
     // stuck in the mempool, this send reuses its nonce and replaces it instead of
     // queueing behind it forever. Floored at one past our last confirmed-mined nonce
     // so a node that hasn't caught up can't hand back a consumed one.
-    let nonce = await this.wallet.getNonce("latest");
+    // Use a raw RPC call instead of Signer.getNonce(). JsonRpcProvider caches some
+    // reads briefly; immediately after another process (or an operator command) uses
+    // this oracle key, that cache can return the already-consumed nonce even after the
+    // external transaction's receipt has landed.
+    const rawNonce = (await this.provider.send("eth_getTransactionCount", [
+      this.wallet.address,
+      "latest",
+    ])) as string;
+    let nonce = Number(BigInt(rawNonce));
+    if (!Number.isSafeInteger(nonce)) {
+      throw new RangeError(
+        `account nonce ${rawNonce} exceeds JavaScript safe integer range`
+      );
+    }
     if (this.lastMinedNonce !== undefined && nonce <= this.lastMinedNonce) {
       nonce = this.lastMinedNonce + 1;
     }

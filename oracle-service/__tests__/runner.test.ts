@@ -136,6 +136,38 @@ describe("runTick", () => {
     expect(result.twapTxHash).toBe("0xtwaphash");
   });
 
+  it("pushes a spot ratio to TWAPReader instead of time-weighting the price twice", async () => {
+    let clock = 0;
+    const twap = new TwapAggregator(10_000, () => clock);
+    // Seed enough older observations that the off-chain rolling averages differ from
+    // the next spot fetch. TWAPReader owns the ATTEST/CTC averaging window on-chain.
+    twap.record("creditcoin-2", 1);
+    twap.record("attestcoin", 10);
+    clock = 100;
+    twap.record("creditcoin-2", 1);
+    twap.record("attestcoin", 20);
+    clock = 200;
+
+    const writer = writerSpy(async () => "twap");
+    const result = await runTick({
+      config: makeConfig({ attestTokenId: "attestcoin" }),
+      priceSource: priceSourceStub({
+        "creditcoin-2": 1,
+        attestcoin: 50,
+        ethereum: 3000,
+      }),
+      twap,
+      gasReader: gasReaderStub({ 2: 1n }),
+      writer,
+    });
+
+    // The off-chain averages would produce 35/1. The reader must receive the newly
+    // fetched 50/1 spot ratio so its own cumulative-price logic averages it once.
+    expect(twap.average("attestcoin")).toBe(35);
+    expect(result.ctcPerAttest).toBe(usdRatioWad(50, 1));
+    expect(writer.twapSamples).toEqual([usdRatioWad(50, 1)]);
+  });
+
   it("re-reads the contract mode each tick, so an on-chain toggle is picked up", async () => {
     let mode: PricingMode = "penguinswap";
     const writer = writerSpy(async () => mode);
