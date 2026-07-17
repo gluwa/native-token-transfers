@@ -221,7 +221,13 @@ maybe(
           expectedRatio
         );
 
-        // With the anchor and the reader sample in place, the quoter can derive
+        // TWAPReader deliberately rejects reads until observations span its complete
+        // 10-minute default window. Age the first observation through that window;
+        // its constant-price cumulative is then a valid TWAP.
+        await provider.send("evm_increaseTime", [600]);
+        await provider.send("evm_mine", []);
+
+        // With the anchor and a full reader window in place, the quoter can derive
         // ATTEST/USD: sourcePrice × ctcPerAttest / 1e18 (= 5e6 USD ×1e10).
         expect((await quoterContract.getAttestUsdPrice()) as bigint).toBe(
           usdToScaled(5_000_000)
