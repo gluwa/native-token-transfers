@@ -13,7 +13,7 @@ import { DEFAULT_RETRY, type RetryOptions, withRetry } from "./retry.js";
 
 /// Mirrors USCRelayingQuoter's IUSCRelayingQuoter.PricingData — field order matters for
 /// ABI encoding. `baseFee` is in CTC wei; `dstPrice`/`srcPrice` are USD ×1e10;
-/// `priceBuffer` is a uint16 in parts per 100,000 (BPS_DENOMINATOR = 100_000).
+/// `priceBuffer` is a uint16 in basis points (BPS_DENOMINATOR = 10_000).
 export interface PricingData {
   baseFee: bigint;
   dstGasPrice: bigint;

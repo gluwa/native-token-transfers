@@ -23,8 +23,8 @@ export interface ChainConfig {
   rpcUrl: string;
   /// CoinGecko id of the chain's native token (e.g. "ethereum", "binancecoin").
   coingeckoId: string;
-  /// Per-chain upward adjustment in parts per 100,000 (the contract's
-  /// BPS_DENOMINATOR); uint16, so at most 65,535 (= +65.5%).
+  /// Per-chain upward adjustment in basis points (the contract's
+  /// BPS_DENOMINATOR = 10,000); uint16, so at most 65,535 (= +655.35%).
   priceBuffer: bigint;
   /// Flat fee in CTC wei (uint256 on-chain).
   baseFee: bigint;

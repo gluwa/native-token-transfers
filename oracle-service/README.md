@@ -67,14 +67,14 @@ All config is via environment variables:
     "chainId": 2,
     "rpcUrl": "https://eth-rpc",
     "coingeckoId": "ethereum",
-    "priceBuffer": "500",
+    "priceBuffer": "50",
     "baseFee": "1000000000000000"
   },
   {
     "chainId": 4,
     "rpcUrl": "https://bsc-rpc",
     "coingeckoId": "binancecoin",
-    "priceBuffer": "500",
+    "priceBuffer": "50",
     "baseFee": "1000000000000000"
   }
 ]
@@ -83,7 +83,7 @@ All config is via environment variables:
 - `chainId` — Wormhole chain id (non-zero uint16); a JSON number.
 - `rpcUrl` — destination-chain RPC, read for current gas price.
 - `coingeckoId` — CoinGecko id of the native token.
-- `priceBuffer` — per-chain upward adjustment in **parts per 100,000** (the contract's `BPS_DENOMINATOR = 100_000`, so `"500"` = +0.5%). uint16 on-chain, max `65535` (+65.5%). **Decimal string**; omit for 0.
+- `priceBuffer` — per-chain upward adjustment in **basis points** (the contract's `BPS_DENOMINATOR = 10_000`, so `"50"` = +0.5%). uint16 on-chain, max `65535` (+655.35%). **Decimal string**; omit for 0.
 - `baseFee` — flat fee in **CTC wei** (uint256 — values above uint64 like 100 CTC = 1e20 are fine). **Decimal string** (wei values exceed JS's safe integer range — a bare number would lose precision); omit for 0.
 
 Retry only kicks in for transient failures (RPC `NETWORK_ERROR`/`SERVER_ERROR`/`TIMEOUT`, CoinGecko 5xx/429, transport errors). Contract reverts and CoinGecko 4xx are not retried. The tick's sends (`TWAPReader.update`, `batchPriceUpdate`) are **not** retried within a tick — a transient failure simply skips to the next interval, which overwrites prices anyway, so there is no double-submission risk. Waiting for a receipt is bounded by `ORACLE_TX_WAIT_TIMEOUT_MS` so a transaction stuck in the mempool fails the tick instead of freezing the loop; a running instance reuses that tx's nonce with fees bumped ≥12.5%. A fresh instance never replaces an unknown pending transaction because its fee is unavailable; it logs and waits for that transaction to mine or drop. The per-tick `pricingMode()` read is covered by the same retry policy; if it still fails, the tick is skipped rather than priced under a guessed mode.
