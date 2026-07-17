@@ -43,6 +43,7 @@
     "sdk/examples",
     "cli",
     "quoter-service",
+    "oracle-service",
     "relayer-bot"
   ],
   "overrides": {
